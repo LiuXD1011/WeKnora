@@ -94,6 +94,17 @@ func RegisterSessionRoutes(
 		sessions.GET("/:id/artifacts", handler.ListSessionArtifacts)
 		sessions.GET("/:id/messages/:message_id/artifacts", handler.ListMessageArtifacts)
 		sessions.GET("/:id/messages/:message_id/artifacts/:index/download", handler.DownloadMessageArtifact)
+
+		// Live sandbox workbench. All file paths are relative to
+		// /workspace/output and the handler resolves the provider exclusively
+		// from the owned session's server-side config pin.
+		sessions.GET("/:id/sandbox/workbench", handler.GetSandboxWorkbenchInfo)
+		sessions.GET("/:id/sandbox/files", handler.ListSandboxWorkbenchFiles)
+		sessions.GET("/:id/sandbox/files/content", handler.DownloadSandboxWorkbenchFile)
+		sessions.POST("/:session_id/sandbox/files", handler.UploadSandboxWorkbenchFile)
+		sessions.POST("/:session_id/sandbox/files/rename", handler.RenameSandboxWorkbenchFile)
+		sessions.DELETE("/:id/sandbox/files", handler.DeleteSandboxWorkbenchFile)
+		sessions.POST("/:session_id/sandbox/terminal/exec", handler.ExecuteSandboxWorkbenchCommand)
 	}
 }
 

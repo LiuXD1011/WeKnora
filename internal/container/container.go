@@ -310,6 +310,9 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	// The factory returns nil when the sandbox backend does not support
 	// per-session file inspection; downstream code guards on nil.
 	must(container.Provide(service.NewArtifactCollectorFromSandboxManager))
+	// Session-scoped terminal and artifact workspace facade. It reuses the
+	// same resolver/pin/ownership gates as agent skill execution.
+	must(container.Provide(service.NewSandboxWorkbenchService))
 
 	logger.Debugf(ctx, "[Container] Registering task enqueuer...")
 	redisAvailable := os.Getenv("REDIS_ADDR") != ""
