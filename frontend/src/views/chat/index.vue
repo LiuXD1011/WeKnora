@@ -4,7 +4,8 @@
         'is-sidebar-collapsed': uiStore.sidebarCollapsed,
         'has-references-panel': referencesDrawerVisible,
     }">
-        <ChatHeader v-if="!embeddedMode" :session="currentSession" :has-references-panel="referencesDrawerVisible" />
+        <ChatHeader v-if="!embeddedMode" :session="currentSession" :has-references-panel="referencesDrawerVisible"
+            @open-workbench="sandboxWorkbenchVisible = true" />
         <div class="chat_thread">
             <div ref="scrollContainer" class="chat_scroll_box" @scroll="handleScroll">
                 <div class="msg_list" :class="{ 'is-embedded': embeddedMode }">
@@ -135,6 +136,7 @@
         @update:visible="(val) => val ? null : uiStore.closeKBEditor()" @success="handleKBEditorSuccess" />
     <ChatReferencesDrawer />
     <ChatAttachmentPreviewDrawer />
+    <SandboxWorkbenchDrawer v-if="!embeddedMode" v-model:visible="sandboxWorkbenchVisible" :session-id="session_id" />
 </template>
 <script setup>
 import { storeToRefs } from 'pinia';
@@ -164,6 +166,7 @@ import MessageTimestamp from '@/components/chat/MessageTimestamp.vue';
 import ChatQuestionMinimap from '@/components/chat/ChatQuestionMinimap.vue';
 import { shouldShowConversationTimestamp } from '@/utils/messageTimestamp';
 import ChatHeader from '@/components/ChatHeader.vue';
+import SandboxWorkbenchDrawer from './components/SandboxWorkbenchDrawer.vue';
 import {
     notifySessionMutation,
     SESSION_MUTATION_EVENT,
@@ -178,6 +181,7 @@ import { provideChatAttachmentPreviewDrawer } from '@/composables/useChatAttachm
 const referencesDrawer = provideChatReferencesDrawer();
 provideChatAttachmentPreviewDrawer();
 const { visible: referencesDrawerVisible } = referencesDrawer;
+const sandboxWorkbenchVisible = ref(false);
 
 const props = defineProps({
     session_id: { type: String, default: '' },

@@ -26,6 +26,17 @@
       <t-icon v-if="session?.is_pinned" name="pin" size="12px" class="chat-header__pin" />
       <span class="chat-header__title-text">{{ displayTitle }}</span>
     </h1>
+    <button
+      v-if="!titleEditing"
+      type="button"
+      class="chat-header__menu-btn chat-header__workbench-btn"
+      :disabled="!session"
+      title="打开可视化沙箱工作台"
+      aria-label="打开可视化沙箱工作台"
+      @click.stop="emit('open-workbench')"
+    >
+      <t-icon name="code" size="16px" />
+    </button>
     <t-popup
       v-if="!titleEditing"
       v-model:visible="menuVisible"
@@ -141,6 +152,10 @@ type MenuMode = 'menu' | 'clear' | 'delete'
 const props = defineProps<{
   session: ChatHeaderSession | null
   hasReferencesPanel?: boolean
+}>()
+
+const emit = defineEmits<{
+  (event: 'open-workbench'): void
 }>()
 
 const { t } = useI18n()
