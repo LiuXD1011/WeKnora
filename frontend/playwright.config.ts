@@ -23,7 +23,9 @@ export default defineConfig({
     // Port 5175 on purpose: 5173 is commonly taken by other local dev
     // servers, and a strict-port instance we own keeps the harness isolated.
     baseURL: 'http://localhost:8123',
-    viewport: { width: 1600, height: 950 },
+    // Narrow viewport on purpose: the drawer docks right at 820px, so a
+    // ~920px frame keeps evidence screenshots focused on the workbench.
+    viewport: { width: 920, height: 950 },
     screenshot: 'only-on-failure',
     trace: 'retain-on-failure',
   },

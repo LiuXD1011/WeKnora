@@ -24,6 +24,7 @@
 import { onMounted, onUnmounted, ref } from 'vue'
 import { Terminal } from '@xterm/xterm'
 import { FitAddon } from '@xterm/addon-fit'
+import '@xterm/xterm/css/xterm.css'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { openSandboxWorkbenchTerminal } from '@/api/chat/sandbox-workbench'
 

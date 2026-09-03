@@ -24,15 +24,23 @@ const FILE_ENTRIES_ROOT = [
   },
   { name: 'deck.pptx', path: 'deck.pptx', type: 'file', size: 482_013, mod_time: '2026-09-02T10:06:00Z' },
   { name: 'sales.csv', path: 'sales.csv', type: 'file', size: 128, mod_time: '2026-09-02T10:07:00Z' },
+  { name: 'summary.md', path: 'summary.md', type: 'file', size: 1_024, mod_time: '2026-09-02T10:09:00Z' },
+  { name: 'chart.png', path: 'chart.png', type: 'file', size: 86_400, mod_time: '2026-09-02T10:10:00Z' },
 ]
 
 const FILE_ENTRIES_REPORTS = [
   { name: 'a.txt', path: 'reports/a.txt', type: 'file', size: 24, mod_time: '2026-09-02T10:08:00Z' },
 ]
 
-const HTML_ARTIFACT = `<!doctype html><html><body>
-<h1>sandbox artifact</h1>
-<script>try { document.cookie = 'probe=1' } catch (e) {}</script>
+const HTML_ARTIFACT = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>课题汇报</title>
+<style>body{margin:0;background:#0f2440;color:#fff;font-family:"Microsoft YaHei",sans-serif}
+.slide{box-sizing:border-box;min-height:100vh;padding:9vh 8vw;display:none;background:linear-gradient(135deg,#0f2440,#183a5a)}
+.slide.active{display:block}h1{font-size:40px;border-left:8px solid #07c05f;padding-left:20px}
+li{font-size:24px;line-height:1.8}.num{position:fixed;right:3vw;bottom:3vh;color:#a9bdca}</style></head><body>
+<div class="slide active"><h1>可视化沙箱工作台</h1><ul><li>交互式终端 · 实时可观测</li><li>产物在线预览 · 一键下载</li></ul><span class="num">1/3</span></div>
+<div class="slide"><h1>架构要点</h1><ul><li>会话级沙箱能力协商</li><li>双防线路径安全策略</li><li>全链路命令审计</li></ul><span class="num">2/3</span></div>
+<div class="slide"><h1>演示链路</h1><ul><li>Agent 生成 PPTX</li><li>工作台在线预览与下载</li></ul><span class="num">3/3</span></div>
+<script>const s=[...document.querySelectorAll('.slide')];let c=0;function show(n){c=(n+s.length)%s.length;s.forEach((x,i)=>x.classList.toggle('active',i===c))}addEventListener('keydown',e=>{if(e.key==='ArrowRight')show(c+1);if(e.key==='ArrowLeft')show(c-1)});</script>
 </body></html>`
 
 function workbenchCapabilities(sessionId: string) {
@@ -106,6 +114,17 @@ async function mockWorkbenchApi(page: Page) {
   return { listRequests, contentRequests, execRequests }
 }
 
+/**
+ * Silently satisfies the interactive terminal handshake for scenarios whose
+ * screenshots focus on other tabs, so no connection-error toast appears.
+ */
+async function mockTerminalReady(page: Page) {
+  await page.routeWebSocket(/\/sandbox\/terminal\/ws/, server => {
+    server.onMessage(() => {})
+    server.send(JSON.stringify({ type: 'ready', terminal_id: 'term-e2e-bg', backend: 'docker' }))
+  })
+}
+
 /** Opens the harness page for a scenario and waits for the drawer. */
 async function openWorkbench(page: Page, scenario: string) {
   await page.goto(`/e2e/workbench?session=${scenario}`)
@@ -117,16 +136,38 @@ test.describe('sandbox workbench drawer', () => {
     const received: (string | Buffer)[] = []
     let resizeFrames = 0
 
+    const PROMPT = 'user@workspace:/workspace/output$ '
+    // CRLF built without escapes: the PTY contract is CRLF line endings.
+    const CRLF = String.fromCharCode(13, 10)
+    const banner = [
+      'WeKnora sandbox terminal (docker)',
+      'Workspace: /workspace  Account: user',
+    ].join(CRLF) + CRLF + PROMPT
+    const listing = [
+      'total 12',
+      'drwxr-xr-x 2 user user   4096 Sep  2 10:08 reports',
+      '-rw-r--r-- 1 user user 482013 Sep  2 10:06 deck.pptx',
+      '-rw-r--r-- 1 user user    128 Sep  2 10:07 sales.csv',
+    ].join(CRLF) + CRLF + PROMPT
     await page.routeWebSocket(/\/sandbox\/terminal\/ws/, server => {
       server.onMessage(message => {
         received.push(message)
         if (typeof message === 'string') {
           const event = JSON.parse(message)
           if (event.type === 'resize') resizeFrames += 1
+          return
+        }
+        // Behave like a real PTY: echo the keystrokes, and answer a completed
+        // line with listing output plus a fresh prompt.
+        const text = message.toString()
+        server.send(Buffer.from(text, 'utf-8'))
+        if (text.endsWith(String.fromCharCode(13))) {
+          server.send(Buffer.from(listing, 'utf-8'))
         }
       })
-      // The server-side lifecycle: ready → (browser types) → exit.
+      // The server-side lifecycle: banner + prompt, then the browser types.
       server.send(JSON.stringify({ type: 'ready', terminal_id: 'term-e2e-1', backend: 'docker' }))
+      server.send(Buffer.from(banner, 'utf-8'))
     })
 
     await mockWorkbenchApi(page)
@@ -136,10 +177,11 @@ test.describe('sandbox workbench drawer', () => {
     await expect(page.getByText(/已连接/)).toBeVisible({ timeout: 15_000 })
     await expect(page.getByText('term-e2e-1')).toBeVisible()
 
-    // Focus the terminal and type a command; xterm ships it as binary frames.
+    // Focus the terminal and type a command; xterm ships it as binary frames
+    // and the fake PTY echoes prompt + listing back.
     const host = page.locator('[data-interactive-terminal]')
     await host.click()
-    await page.keyboard.type('echo hello-workbench')
+    await page.keyboard.type('ls -la')
     await page.keyboard.press('Enter')
 
     await expect
@@ -149,7 +191,7 @@ test.describe('sandbox workbench drawer', () => {
       .filter(item => typeof item !== 'string')
       .map(item => (item as Buffer).toString())
       .join('')
-    expect(typed).toContain('echo hello-workbench')
+    expect(typed).toContain('ls -la')
 
     // The FitAddon fires an initial resize once the socket is open.
     expect(resizeFrames).toBeGreaterThanOrEqual(1)
@@ -161,7 +203,6 @@ test.describe('sandbox workbench drawer', () => {
   })
 
   test('interactive terminal exit event is surfaced with its reason', async ({ page }) => {
-    test.info().annotations.push({ description: 'Verifies the exit protocol event drives the status bar.' })
     await page.routeWebSocket(/\/sandbox\/terminal\/ws/, server => {
       server.onMessage(() => {})
       server.send(JSON.stringify({ type: 'ready', terminal_id: 'term-e2e-2', backend: 'docker' }))
@@ -199,10 +240,11 @@ test.describe('sandbox workbench drawer', () => {
 
   test('file manager lists, navigates directories and returns via breadcrumb', async ({ page }) => {
     const api = await mockWorkbenchApi(page)
+    await mockTerminalReady(page)
     await openWorkbench(page, 'e2e-interactive')
 
     await page.locator('.t-tabs__nav-item').filter({ hasText: '文件' }).click()
-    await expect(page.getByText('产物目录 · 4 项')).toBeVisible()
+    await expect(page.getByText('产物目录 · 6 项')).toBeVisible()
     await expect(page.getByText('presentation.html')).toBeVisible()
     await expect(page.getByText('deck.pptx')).toBeVisible()
 
@@ -214,7 +256,7 @@ test.describe('sandbox workbench drawer', () => {
     // Breadcrumbs: the root crumb is labelled output.
     await expect(page.getByText('产物目录 · 1 项')).toBeVisible()
     await page.getByRole('button', { name: 'output', exact: true }).click()
-    await expect(page.getByText('产物目录 · 4 项')).toBeVisible()
+    await expect(page.getByText('产物目录 · 6 项')).toBeVisible()
     expect(api.listRequests.filter(path => path === '').length).toBeGreaterThanOrEqual(2)
 
     await page.screenshot({ path: `${SHOT_DIR}/files-navigation.png` })
@@ -222,6 +264,7 @@ test.describe('sandbox workbench drawer', () => {
 
   test('html artifact previews inside a sandboxed iframe without same-origin', async ({ page }) => {
     const api = await mockWorkbenchApi(page)
+    await mockTerminalReady(page)
     await openWorkbench(page, 'e2e-interactive')
 
     await page.locator('.t-tabs__nav-item').filter({ hasText: '文件' }).click()
@@ -242,6 +285,7 @@ test.describe('sandbox workbench drawer', () => {
 
   test('csv artifact renders as a read-only sheet view', async ({ page }) => {
     const api = await mockWorkbenchApi(page)
+    await mockTerminalReady(page)
     await openWorkbench(page, 'e2e-interactive')
 
     await page.locator('.t-tabs__nav-item').filter({ hasText: '文件' }).click()
