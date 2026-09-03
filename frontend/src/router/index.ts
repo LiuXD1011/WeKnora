@@ -50,6 +50,18 @@ const router = createRouter({
       path: "/",
       redirect: "/platform/knowledge-bases",
     },
+    // DEV-ONLY E2E harness for the sandbox workbench. Registered out of
+    // production builds entirely; see views/e2e/WorkbenchHarness.vue.
+    ...(import.meta.env.DEV
+      ? [
+          {
+            path: "/e2e/workbench",
+            name: "e2eWorkbench",
+            component: () => import("../views/e2e/WorkbenchHarness.vue"),
+            meta: { requiresAuth: false, requiresInit: false },
+          },
+        ]
+      : []),
     {
       path: "/login",
       name: "login",

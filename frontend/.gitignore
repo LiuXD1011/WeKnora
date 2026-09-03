@@ -28,3 +28,9 @@ coverage
 *.sw?
 
 *.tsbuildinfo
+
+# Playwright
+test-results/
+e2e-report/
+e2e-artifacts/
+playwright-report/
