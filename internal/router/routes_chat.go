@@ -105,6 +105,10 @@ func RegisterSessionRoutes(
 		sessions.POST("/:session_id/sandbox/files/rename", handler.RenameSandboxWorkbenchFile)
 		sessions.DELETE("/:id/sandbox/files", handler.DeleteSandboxWorkbenchFile)
 		sessions.POST("/:session_id/sandbox/terminal/exec", handler.ExecuteSandboxWorkbenchCommand)
+		// Interactive PTY terminal. Binary frames carry raw terminal bytes in
+		// both directions; the JWT arrives as the bearer WebSocket sub-protocol
+		// because browsers cannot set headers on a WebSocket handshake.
+		sessions.GET("/:id/sandbox/terminal/ws", handler.TerminalSandboxWorkbenchWS)
 	}
 }
 

@@ -2,11 +2,14 @@ package service
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"path"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/sandbox"
@@ -24,12 +27,35 @@ const (
 	// and process limits remain authoritative; this cap prevents a browser tab
 	// from turning the request handler into an unbounded job runner.
 	SandboxWorkbenchMaxCommandTimeout = 5 * time.Minute
+
+	// SandboxWorkbenchMaxTerminalsPerSession caps concurrent interactive
+	// terminals per session. Two covers the "watch the agent while typing"
+	// case without letting abandoned tabs pin provider connections forever.
+	SandboxWorkbenchMaxTerminalsPerSession = 2
+
+	// SandboxWorkbenchTerminalLease is the hard lifetime of one interactive
+	// terminal. It is the 时长 half of the resource-limit acceptance item:
+	// when the lease ends the PTY dies with its context, and the browser
+	// receives an exit event whose reason says so.
+	SandboxWorkbenchTerminalLease = 30 * time.Minute
+
+	// SandboxWorkbenchTerminalKeepAliveInterval refreshes the docker
+	// idle-sweep activity marker while a terminal is open. The terminal shell
+	// runs without the exec wrapper, so nothing else would touch the marker
+	// and the sweeper would reap the container after DefaultDockerIdleTTL.
+	SandboxWorkbenchTerminalKeepAliveInterval = 4 * time.Minute
 )
 
 var (
 	ErrSandboxWorkbenchNotReady    = errors.New("sandbox workbench: session has no live sandbox")
 	ErrSandboxWorkbenchUnsupported = errors.New("sandbox workbench: backend does not support this capability")
 	ErrSandboxWorkbenchPath        = errors.New("sandbox workbench: path must stay inside the artifact directory")
+)
+
+// ErrSandboxWorkbenchTerminalLimit rejects a new interactive terminal when the
+// session already holds the maximum number of live ones.
+var ErrSandboxWorkbenchTerminalLimit = errors.New(
+	"sandbox workbench: session already has the maximum number of terminals",
 )
 
 // SandboxWorkbenchFile is the browser-safe projection of a provider entry.
@@ -68,6 +94,10 @@ type SandboxWorkbenchInfo struct {
 	ArtifactRoot string `json:"artifact_root"`
 	Terminal     bool   `json:"terminal"`
 	Files        bool   `json:"files"`
+	// Interactive reports that the backend offers a real PTY over the
+	// WebSocket terminal. When false the frontend degrades to one-shot exec
+	// commands instead of pretending to be an interactive shell.
+	Interactive bool `json:"interactive"`
 }
 
 // SandboxWorkbenchService exposes the live session sandbox without letting a
@@ -80,6 +110,11 @@ type SandboxWorkbenchService struct {
 	pinner   *SessionSandboxPinner
 	policy   WorkspaceSandboxPolicy
 	audit    interfaces.AuditLogService
+
+	// terminalsMu guards terminalCounts, the per-session live-terminal census
+	// behind SandboxWorkbenchMaxTerminalsPerSession.
+	terminalsMu    sync.Mutex
+	terminalCounts map[string]int
 }
 
 func NewSandboxWorkbenchService(
@@ -91,21 +126,28 @@ func NewSandboxWorkbenchService(
 	audit interfaces.AuditLogService,
 ) *SandboxWorkbenchService {
 	return &SandboxWorkbenchService{
-		sessions: sessions,
-		fallback: fallback,
-		resolver: resolver,
-		pinner:   pinner,
-		policy:   policy,
-		audit:    audit,
+		sessions:       sessions,
+		fallback:       fallback,
+		resolver:       resolver,
+		pinner:         pinner,
+		policy:         policy,
+		audit:          audit,
+		terminalCounts: make(map[string]int),
 	}
 }
 
 // cleanArtifactRelativePath accepts only a relative path and anchors it under
-// /workspace/output. Absolute paths, backslashes and traversal are rejected
-// rather than normalised, so callers get a clear server-side denial.
+// /workspace/output. Absolute paths, backslashes, null bytes and traversal
+// are rejected rather than normalised, so callers get a clear server-side
+// denial. URL-encoded traversals arrive here already decoded by the HTTP
+// layer and fold into the same checks; double-encoded sequences stay as
+// literal file names, which cannot escape the root.
 func cleanArtifactRelativePath(value string, allowRoot bool) (string, string, error) {
 	raw := strings.TrimSpace(value)
 	if strings.Contains(raw, "\\") || strings.HasPrefix(raw, "/") {
+		return "", "", ErrSandboxWorkbenchPath
+	}
+	if strings.ContainsRune(raw, '\x00') {
 		return "", "", ErrSandboxWorkbenchPath
 	}
 	clean := path.Clean(raw)
@@ -253,6 +295,9 @@ func (s *SandboxWorkbenchService) Info(
 	if provider, ok := mgr.(sandbox.SessionCapabilityProvider); ok {
 		info.Terminal = provider.SessionShellExecutor() != nil
 		info.Files = provider.SessionFileStore() != nil
+	}
+	if provider, ok := mgr.(sandbox.SessionTerminalCapabilityProvider); ok {
+		info.Interactive = provider.SessionTerminalProvider() != nil
 	}
 	return info, nil
 }
@@ -498,5 +543,205 @@ func (s *SandboxWorkbenchService) auditCommand(
 		ScopeType: "session", ScopeID: session.ID,
 		TargetType: "sandbox_session", TargetID: session.ID,
 		Outcome: outcome, Details: types.JSON(details),
+	})
+}
+
+// WorkbenchTerminal is one live interactive terminal opened through the
+// broker. Close is idempotent and must be called by the WebSocket pump when
+// the browser disconnects, the lease expires, or the process exits.
+type WorkbenchTerminal struct {
+	ID      string
+	Backend string
+	Session sandbox.SessionTerminalSession
+
+	closeOnce sync.Once
+	closeFunc func(reason string, exitCode int)
+}
+
+// Close releases the terminal: it tears down the PTY, stops the keep-alive,
+// frees the per-session slot, and writes the close audit entry. The reason
+// and exit code land in the audit details verbatim.
+func (t *WorkbenchTerminal) Close(reason string, exitCode int) {
+	t.closeOnce.Do(func() { t.closeFunc(reason, exitCode) })
+}
+
+func newTerminalID() string {
+	buf := make([]byte, 8)
+	if _, err := rand.Read(buf); err != nil {
+		return fmt.Sprintf("term-%d", time.Now().UnixNano())
+	}
+	return "term-" + hex.EncodeToString(buf)
+}
+
+// terminalProvider resolves the owned session, its interactive-terminal
+// capability and the backend label, mirroring the gate chain of
+// fileStore/shellExecutor.
+func (s *SandboxWorkbenchService) terminalProvider(
+	ctx context.Context, sessionID string,
+) (sandbox.SessionTerminalProvider, *types.Session, sandbox.SandboxType, error) {
+	mgr, session, err := s.ownedManager(ctx, sessionID)
+	if err != nil {
+		return nil, session, "", err
+	}
+	provider, ok := mgr.(sandbox.SessionTerminalCapabilityProvider)
+	if !ok || provider.SessionTerminalProvider() == nil {
+		return nil, session, "", ErrSandboxWorkbenchUnsupported
+	}
+	return provider.SessionTerminalProvider(), session, mgr.GetType(), nil
+}
+
+// OpenTerminal opens one interactive PTY inside the session's sandbox under a
+// hard lease. The lease context handed to the provider is the lifetime
+// guarantee: when it expires the PTY dies and the browser's output pump sees
+// EOF, so no orphan shell can outlive the workbench.
+func (s *SandboxWorkbenchService) OpenTerminal(
+	ctx context.Context, sessionID string, cols, rows uint16,
+) (*WorkbenchTerminal, error) {
+	if cols == 0 {
+		cols = 80
+	}
+	if rows == 0 {
+		rows = 24
+	}
+	sessionID = strings.TrimSpace(sessionID)
+
+	s.terminalsMu.Lock()
+	if s.terminalCounts[sessionID] >= SandboxWorkbenchMaxTerminalsPerSession {
+		s.terminalsMu.Unlock()
+		return nil, ErrSandboxWorkbenchTerminalLimit
+	}
+	s.terminalsMu.Unlock()
+
+	leaseCtx, cancelLease := context.WithTimeout(ctx, SandboxWorkbenchTerminalLease)
+	provider, session, backend, err := s.terminalProvider(leaseCtx, sessionID)
+	if err != nil {
+		cancelLease()
+		return nil, err
+	}
+	terminalSession, err := provider.OpenSessionTerminal(leaseCtx, sessionID, sandbox.SessionTerminalOptions{
+		WorkDir: sandbox.SessionWorkspaceRoot,
+		Cols:    cols,
+		Rows:    rows,
+	})
+	if err != nil {
+		cancelLease()
+		return nil, err
+	}
+
+	s.terminalsMu.Lock()
+	// Re-check under the lock: two concurrent opens could otherwise both pass
+	// the pre-check and exceed the cap.
+	if s.terminalCounts[sessionID] >= SandboxWorkbenchMaxTerminalsPerSession {
+		s.terminalsMu.Unlock()
+		_ = terminalSession.Close()
+		cancelLease()
+		return nil, ErrSandboxWorkbenchTerminalLimit
+	}
+	s.terminalCounts[sessionID]++
+	s.terminalsMu.Unlock()
+
+	terminal := &WorkbenchTerminal{
+		ID:      newTerminalID(),
+		Backend: string(backend),
+		Session: terminalSession,
+	}
+	terminal.closeFunc = func(reason string, exitCode int) {
+		_ = terminalSession.Close()
+		cancelLease()
+		s.terminalsMu.Lock()
+		if s.terminalCounts[sessionID] > 0 {
+			s.terminalCounts[sessionID]--
+		}
+		if s.terminalCounts[sessionID] == 0 {
+			delete(s.terminalCounts, sessionID)
+		}
+		s.terminalsMu.Unlock()
+		s.auditTerminalEvent(ctx, session, "sandbox.terminal_closed", terminal.ID, map[string]any{
+			"reason":    reason,
+			"exit_code": exitCode,
+		})
+	}
+	s.auditTerminalEvent(leaseCtx, session, "sandbox.terminal_opened", terminal.ID, map[string]any{
+		"backend":       terminal.Backend,
+		"cols":          cols,
+		"rows":          rows,
+		"lease_minutes": int(SandboxWorkbenchTerminalLease.Minutes()),
+	})
+
+	go s.keepTerminalAlive(leaseCtx, sessionID, terminal.ID)
+	return terminal, nil
+}
+
+// keepTerminalAlive periodically runs a wrapper exec so the docker idle sweep
+// keeps seeing fresh activity while a terminal is open. The lease context
+// stops the loop when the terminal's lifetime ends; the first failed resolve
+// (session deleted, backend gone) stops it early.
+func (s *SandboxWorkbenchService) keepTerminalAlive(ctx context.Context, sessionID, terminalID string) {
+	ticker := time.NewTicker(SandboxWorkbenchTerminalKeepAliveInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+		}
+		executor, _, err := s.shellExecutor(ctx, sessionID)
+		if err != nil {
+			return
+		}
+		// The wrapper command touches the idle-sweep marker; failures here are
+		// cosmetic and retried on the next tick.
+		_, _ = executor.ExecShellCommand(
+			ctx, sessionID, "true", sandbox.SessionWorkspaceRoot, 10*time.Second, nil,
+		)
+	}
+}
+
+// AuditTerminalInput records one interactive command line. The PTY stream
+// itself is opaque, so the WebSocket pump reconstructs what the user typed
+// and reports completed lines here; that keeps the per-command audit promise
+// for interactive terminals too. Ctrl-C submissions arrive as interrupted
+// lines and are stored the same way, marked with interrupted=true.
+func (s *SandboxWorkbenchService) AuditTerminalInput(
+	ctx context.Context, sessionID, terminalID, line string, interrupted bool,
+) {
+	line = strings.TrimRight(line, "\r\n")
+	if line == "" && !interrupted {
+		return
+	}
+	_, session, err := s.ownedManager(ctx, sessionID)
+	if err != nil || session == nil {
+		return
+	}
+	command := line
+	if interrupted {
+		if command == "" {
+			command = "^C"
+		} else {
+			command += "^C"
+		}
+	}
+	s.auditTerminalEvent(ctx, session, "sandbox.terminal_command", terminalID, map[string]any{
+		"command":     command,
+		"interrupted": interrupted,
+		"source":      "interactive",
+	})
+}
+
+func (s *SandboxWorkbenchService) auditTerminalEvent(
+	ctx context.Context, session *types.Session, action, terminalID string, details map[string]any,
+) {
+	if s == nil || s.audit == nil || session == nil {
+		return
+	}
+	detailsJSON, _ := json.Marshal(details)
+	actor, _ := types.UserIDFromContext(ctx)
+	_ = s.audit.Log(ctx, &types.AuditLog{
+		TenantID: session.TenantID, ActorUserID: actor,
+		ActorRole: string(types.TenantRoleFromContext(ctx)),
+		Action:    types.AuditAction(action),
+		ScopeType: "session", ScopeID: session.ID,
+		TargetType: "sandbox_terminal", TargetID: terminalID,
+		Outcome: types.AuditOutcomeSuccess, Details: types.JSON(detailsJSON),
 	})
 }

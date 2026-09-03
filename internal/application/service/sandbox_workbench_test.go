@@ -3,7 +3,9 @@ package service
 import (
 	"context"
 	"errors"
+	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -38,6 +40,10 @@ type workbenchManager struct {
 	typeName sandbox.SandboxType
 	store    *workbenchStore
 	shell    *workbenchShell
+	// terminalProvider is nil by default: backends without a PTY transport
+	// keep the capability unadvertised, which is exactly what Info must
+	// surface as Interactive=false.
+	terminalProvider sandbox.SessionTerminalProvider
 }
 
 func (m *workbenchManager) Execute(context.Context, *sandbox.ExecuteConfig) (*sandbox.ExecuteResult, error) {
@@ -50,6 +56,9 @@ func (m *workbenchManager) SessionShellExecutor() sandbox.SessionShellExecutor {
 	return m.shell
 }
 func (m *workbenchManager) SessionFileStore() sandbox.SessionFileStore { return m.store }
+func (m *workbenchManager) SessionTerminalProvider() sandbox.SessionTerminalProvider {
+	return m.terminalProvider
+}
 
 type workbenchStore struct {
 	listCalls int
@@ -212,4 +221,199 @@ func TestSandboxWorkbenchRenameQuotesBothValidatedPaths(t *testing.T) {
 	require.Contains(t, shell.command, "'/workspace/output/old name.txt'")
 	require.Contains(t, shell.command, "'/workspace/output/nested/new name.txt'")
 	require.Equal(t, "/workspace", shell.workDir)
+}
+
+// --- interactive terminal fakes ---------------------------------------------
+
+type workbenchTerminalSession struct {
+	mu       sync.Mutex
+	writeBuf []byte
+	closed   bool
+	closes   int
+}
+
+func (t *workbenchTerminalSession) Read([]byte) (int, error) { return 0, io.EOF }
+func (t *workbenchTerminalSession) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.writeBuf = append(t.writeBuf, p...)
+	return len(p), nil
+}
+func (t *workbenchTerminalSession) Resize(uint16, uint16) error { return nil }
+func (t *workbenchTerminalSession) Close() error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.closed = true
+	t.closes++
+	return nil
+}
+func (t *workbenchTerminalSession) Wait(context.Context) (int, error) { return 0, nil }
+
+type workbenchTerminalProvider struct {
+	opened    int
+	terminals []*workbenchTerminalSession
+	// deadlines records the ctx deadline of each open, proving the lease.
+	deadlines []time.Time
+	// opts records the sandbox options of each open.
+	opts []sandbox.SessionTerminalOptions
+}
+
+func (p *workbenchTerminalProvider) OpenSessionTerminal(
+	ctx context.Context, _ string, opts sandbox.SessionTerminalOptions,
+) (sandbox.SessionTerminalSession, error) {
+	p.opened++
+	p.opts = append(p.opts, opts)
+	if deadline, ok := ctx.Deadline(); ok {
+		p.deadlines = append(p.deadlines, deadline)
+	} else {
+		p.deadlines = append(p.deadlines, time.Time{})
+	}
+	session := &workbenchTerminalSession{}
+	p.terminals = append(p.terminals, session)
+	return session, nil
+}
+
+func newWorkbenchForTerminalTest() (*SandboxWorkbenchService, *workbenchTerminalProvider, *workbenchAudit) {
+	provider := &workbenchTerminalProvider{}
+	store := &workbenchStore{
+		entries: []sandbox.RemoteDirEntry{},
+		stat:    &sandbox.RemoteStatEntry{Path: "/workspace/output/a.txt", Type: sandbox.RemoteEntryFile},
+	}
+	shell := &workbenchShell{result: &sandbox.ExecuteResult{ExitCode: 0}}
+	mgr := &workbenchManager{typeName: sandbox.SandboxTypeDocker, store: store, shell: shell}
+	mgr.terminalProvider = provider
+	audit := &workbenchAudit{}
+	svc := NewSandboxWorkbenchService(
+		&workbenchSessionService{session: &types.Session{ID: "s-1", TenantID: 7, SandboxConfigID: "cfg-1"}},
+		nil, &workbenchResolver{mgr: mgr}, nil, nil, audit,
+	)
+	return svc, provider, audit
+}
+
+// TestSandboxWorkbenchInfoReportsInteractiveCapability ensures the browser
+// learns about PTY support from the capability endpoint instead of probing.
+func TestSandboxWorkbenchInfoReportsInteractiveCapability(t *testing.T) {
+	withTerminal, _, _ := newWorkbenchForTerminalTest()
+	info, err := withTerminal.Info(context.Background(), "s-1")
+	require.NoError(t, err)
+	require.True(t, info.Interactive)
+	require.Equal(t, string(sandbox.SandboxTypeDocker), info.Backend)
+
+	// A backend without the terminal capability (Cube/E2B today) degrades.
+	providerless := NewSandboxWorkbenchService(
+		&workbenchSessionService{session: &types.Session{ID: "s-1", TenantID: 7, SandboxConfigID: "cfg-1"}},
+		nil, &workbenchResolver{mgr: &workbenchManager{typeName: sandbox.SandboxTypeCube,
+			store: &workbenchStore{}, shell: &workbenchShell{}}}, nil, nil, nil,
+	)
+	info, err = providerless.Info(context.Background(), "s-1")
+	require.NoError(t, err)
+	require.False(t, info.Interactive)
+	require.Equal(t, string(sandbox.SandboxTypeCube), info.Backend)
+}
+
+// TestSandboxWorkbenchOpenTerminalEnforcesPerSessionCap locks the governance
+// contract: at most two live terminals per session, slots freed on Close.
+func TestSandboxWorkbenchOpenTerminalEnforcesPerSessionCap(t *testing.T) {
+	svc, provider, _ := newWorkbenchForTerminalTest()
+
+	first, err := svc.OpenTerminal(context.Background(), "s-1", 0, 0)
+	require.NoError(t, err)
+	second, err := svc.OpenTerminal(context.Background(), "s-1", 120, 36)
+	require.NoError(t, err)
+	_, err = svc.OpenTerminal(context.Background(), "s-1", 80, 24)
+	require.ErrorIs(t, err, ErrSandboxWorkbenchTerminalLimit)
+
+	// Defaults applied when the browser sends no size.
+	require.Equal(t, uint16(80), provider.opts[0].Cols)
+	require.Equal(t, uint16(24), provider.opts[0].Rows)
+	require.Equal(t, uint16(120), provider.opts[1].Cols)
+	require.Equal(t, uint16(36), provider.opts[1].Rows)
+
+	// Every open runs under the terminal lease.
+	lease := time.Until(provider.deadlines[0])
+	require.Greater(t, lease, time.Duration(0))
+	require.LessOrEqual(t, lease, SandboxWorkbenchTerminalLease)
+
+	// Closing one frees exactly one slot.
+	first.Close("test", 0)
+	third, err := svc.OpenTerminal(context.Background(), "s-1", 80, 24)
+	require.NoError(t, err)
+	second.Close("test", 0)
+	third.Close("test", 0)
+	require.Equal(t, 3, provider.opened)
+}
+
+// TestSandboxWorkbenchTerminalLifecycleAudits covers the audit trail of one
+// interactive session: opened, per-command lines, closed with the outcome.
+func TestSandboxWorkbenchTerminalLifecycleAudits(t *testing.T) {
+	svc, provider, audit := newWorkbenchForTerminalTest()
+
+	terminal, err := svc.OpenTerminal(context.Background(), "s-1", 80, 24)
+	require.NoError(t, err)
+	require.NotEmpty(t, terminal.ID)
+	require.Equal(t, string(sandbox.SandboxTypeDocker), terminal.Backend)
+
+	svc.AuditTerminalInput(context.Background(), "s-1", terminal.ID, "ls -la /workspace/output", false)
+	svc.AuditTerminalInput(context.Background(), "s-1", terminal.ID, "", true) // bare Ctrl-C
+	terminal.Close("process_exit", 0)
+
+	actions := make([]types.AuditAction, 0, len(audit.entries))
+	for _, entry := range audit.entries {
+		actions = append(actions, entry.Action)
+	}
+	require.Equal(t, []types.AuditAction{
+		"sandbox.terminal_opened",
+		"sandbox.terminal_command",
+		"sandbox.terminal_command",
+		"sandbox.terminal_closed",
+	}, actions)
+
+	// The close entry records why the terminal ended.
+	closed := audit.entries[len(audit.entries)-1]
+	require.Contains(t, string(closed.Details), "process_exit")
+	// The interrupted line is stored as a command with the Ctrl-C marker.
+	interrupted := audit.entries[len(audit.entries)-2]
+	require.Contains(t, string(interrupted.Details), "^C")
+
+	// Closing twice must not double-free the slot or double-audit.
+	closesBefore := len(audit.entries)
+	terminal.Close("late", 1)
+	require.Len(t, audit.entries, closesBefore)
+	require.Equal(t, 1, provider.terminals[0].closes)
+}
+
+// TestCleanArtifactRelativePathRejectsEncodedTraversals covers the attack
+// cases the workbench must refuse regardless of encoding: URL-decoded
+// traversal, backslash forms, null bytes and mixed absolute prefixes.
+func TestCleanArtifactRelativePathRejectsEncodedTraversals(t *testing.T) {
+	for _, input := range []string{
+		"../secret",
+		"a/../../../etc/shadow",
+		"/etc/passwd",
+		`..\secret`,
+		`C:\Windows\system32`,
+		"report\x00.txt",
+		"..\x00/secret",
+		"./../../x",
+	} {
+		_, _, err := cleanArtifactRelativePath(input, false)
+		require.ErrorIs(t, err, ErrSandboxWorkbenchPath, input)
+	}
+
+	// Harmless names survive: a double-encoded traversal decodes once at the
+	// HTTP layer and stays a literal file name inside the artifact root.
+	abs, rel, err := cleanArtifactRelativePath("reports/%2e%2e/list.pptx", false)
+	require.NoError(t, err)
+	require.Equal(t, "/workspace/output/reports/%2e%2e/list.pptx", abs)
+	require.Equal(t, "reports/%2e%2e/list.pptx", rel)
+}
+
+// TestSandboxWorkbenchWriteRejectsOversizedUpload keeps the 20 MiB browser
+// upload bound honest at the service boundary, before any provider call.
+func TestSandboxWorkbenchWriteRejectsOversizedUpload(t *testing.T) {
+	svc, store, _, _, _ := newWorkbenchForTest(sandbox.SandboxTypeDocker)
+	oversized := make([]byte, SandboxWorkbenchMaxUploadBytes+1)
+	err := svc.WriteFile(context.Background(), "s-1", "big.bin", oversized)
+	require.ErrorContains(t, err, "exceeds")
+	require.Empty(t, store.writePath)
 }
