@@ -410,6 +410,55 @@ type RemoteSandboxClient interface {
 	Stat(ctx context.Context, handle RemoteSandboxHandle, path string) (*RemoteStatEntry, error)
 }
 
+// RemoteStreamExecRequest describes one interactive PTY exec. Unlike
+// RemoteExecRequest there is no Timeout field: the terminal's lifetime is the
+// caller's context, and no in-container timeout wrapper may kill a shell the
+// user is still typing into.
+type RemoteStreamExecRequest struct {
+	// Command is the argv to exec. Providers must NOT wrap it in a shell or
+	// append a timeout: the process is the terminal.
+	Command []string
+
+	// Env is merged into the process environment.
+	Env []string
+
+	// WorkDir is the terminal's initial working directory. Empty means
+	// "provider default".
+	WorkDir string
+
+	// User is the OS user the terminal runs as. Empty resolves through the
+	// same choke point as RemoteExecRequest (DefaultSandboxExecUser).
+	User string
+
+	// Cols and Rows seed the pseudo-terminal size.
+	Cols uint16
+	Rows uint16
+}
+
+// RemoteTerminalSession is the provider-side view of one live PTY. The
+// contract mirrors SessionTerminalSession so adapters can hand the concrete
+// type straight through without a second wrapper layer.
+type RemoteTerminalSession interface {
+	Read(p []byte) (int, error)
+	Write(p []byte) (int, error)
+	Resize(cols, rows uint16) error
+	Close() error
+	Wait(ctx context.Context) (int, error)
+}
+
+// RemoteStreamExecClient is the optional PTY capability of a provider client.
+// Adapters whose transport has no interactive process channel (today: the
+// envd-compatible HTTP exec used by Cube/E2B) simply do not implement it; the
+// session manager then keeps the terminal capability nil and the application
+// layer degrades to one-shot shell exec.
+type RemoteStreamExecClient interface {
+	ExecStream(
+		ctx context.Context,
+		handle RemoteSandboxHandle,
+		req RemoteStreamExecRequest,
+	) (RemoteTerminalSession, error)
+}
+
 // cloneMetadata returns a shallow copy of source. Nil input returns nil so
 // callers can distinguish "explicitly empty" from "not set".
 func cloneMetadata(source map[string]string) map[string]string {

@@ -808,6 +808,77 @@ func (m *SessionBoundManager) SessionFileStore() SessionFileStore {
 	return m
 }
 
+// SessionTerminalProvider advertises the interactive-terminal capability while
+// the manager is open and the active provider client implements PTY streaming.
+// Backends without a streaming transport (Cube/E2B's envd-compatible HTTP exec)
+// keep it nil, and the workbench degrades to one-shot shell exec for them.
+func (m *SessionBoundManager) SessionTerminalProvider() SessionTerminalProvider {
+	if m == nil || m.remoteDisabled() {
+		return nil
+	}
+	if _, ok := m.client.(RemoteStreamExecClient); !ok {
+		return nil
+	}
+	return m
+}
+
+// OpenSessionTerminal opens an interactive PTY inside the session's sandbox.
+// The terminal runs as DefaultSandboxExecUser in the same session binding and
+// account contract as ExecShellCommand; the caller owns the context and with
+// it the terminal's lifetime.
+func (m *SessionBoundManager) OpenSessionTerminal(
+	ctx context.Context,
+	sessionID string,
+	opts SessionTerminalOptions,
+) (SessionTerminalSession, error) {
+	if err := m.requireRemoteBackend(); err != nil {
+		return nil, fmt.Errorf(
+			"sandbox: terminal requires the remote sandbox provider (current mode: %s)",
+			m.GetType(),
+		)
+	}
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, errors.New("sandbox: session_id required for OpenSessionTerminal")
+	}
+	streamClient, ok := m.client.(RemoteStreamExecClient)
+	if !ok {
+		return nil, errors.New("sandbox: backend does not support interactive terminals")
+	}
+
+	handle, err := m.resolveSession(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	// The model reaches the sandbox through this path too. Without the same
+	// bootstrap a terminal opened before any skill run would find no artifact
+	// directory and no place to read attachments from.
+	m.ensureSessionWorkspaceDirs(ctx, handle, SessionOutputRoot)
+
+	workDir := strings.TrimSpace(opts.WorkDir)
+	if workDir == "" {
+		workDir = SessionWorkspaceRoot
+	}
+	shell := opts.Shell
+	if len(shell) == 0 {
+		shell = []string{"bash", "-l"}
+	}
+
+	terminal, err := streamClient.ExecStream(ctx, handle, RemoteStreamExecRequest{
+		Command: shell,
+		WorkDir: workDir,
+		// Named explicitly rather than left to the adapter default, mirroring
+		// ExecShellCommandWithOptions: an interactive shell must never depend
+		// on provider defaults for its account.
+		User: DefaultSandboxExecUser,
+		Cols: opts.Cols,
+		Rows: opts.Rows,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return terminal, nil
+}
+
 // Cleanup marks the manager closed. Session sandboxes are not force-deleted
 // here: their lifecycle is authoritative in the binding store and would
 // leak to any other WeKnora replica if this replica reaped them on shutdown.

@@ -64,6 +64,13 @@ type fakeDockerEngine struct {
 	execStreamStalls bool
 	execStream       *stalledReader
 
+	// execTTYOutput carries raw (unframed) output for TTY attaches, which is
+	// what the interactive terminal reads. execTTYRunning drives Wait's
+	// ExecInspect polling; resizeCalls records terminal relayouts.
+	execTTYOutput  string
+	execTTYRunning bool
+	resizeCalls    []client.ExecResizeOptions
+
 	statResult map[string]container.PathStat
 	// statHook lets a test answer differently per call, which is how the
 	// sweeper's re-check before deletion is exercised.
@@ -200,8 +207,17 @@ func (f *fakeDockerEngine) ExecCreate(
 }
 
 func (f *fakeDockerEngine) ExecAttach(
-	_ context.Context, _ string, _ client.ExecAttachOptions,
+	_ context.Context, _ string, options client.ExecAttachOptions,
 ) (client.ExecAttachResult, error) {
+	if options.TTY {
+		// A TTY exec merges the streams: the reader carries raw bytes, exactly
+		// what the interactive terminal's Read pump expects.
+		release := make(chan struct{})
+		return client.ExecAttachResult{HijackedResponse: client.HijackedResponse{
+			Conn:   &fakeHijackedConn{stdin: &f.execStdin, release: release},
+			Reader: bufio.NewReader(strings.NewReader(f.execTTYOutput)),
+		}}, nil
+	}
 	if f.execStreamStalls {
 		release := make(chan struct{})
 		f.execStream = &stalledReader{release: release}
@@ -253,7 +269,14 @@ func (r *stalledReader) Read(p []byte) (int, error) {
 func (f *fakeDockerEngine) ExecInspect(
 	_ context.Context, _ string, _ client.ExecInspectOptions,
 ) (client.ExecInspectResult, error) {
-	return client.ExecInspectResult{ExitCode: f.execExit}, nil
+	return client.ExecInspectResult{Running: f.execTTYRunning, ExitCode: f.execExit}, nil
+}
+
+func (f *fakeDockerEngine) ExecResize(
+	_ context.Context, _ string, options client.ExecResizeOptions,
+) (client.ExecResizeResult, error) {
+	f.resizeCalls = append(f.resizeCalls, options)
+	return client.ExecResizeResult{}, nil
 }
 
 func (f *fakeDockerEngine) ContainerStatPath(

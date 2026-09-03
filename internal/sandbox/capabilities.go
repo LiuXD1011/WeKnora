@@ -122,3 +122,62 @@ type SessionTurnHolder interface {
 	BeginSessionTurn(ctx context.Context, sessionID string) error
 	EndSessionTurn(ctx context.Context, sessionID string) error
 }
+
+// SessionTerminalOptions describes one interactive terminal request. The
+// terminal always runs as DefaultSandboxExecUser, so the option set stays
+// deliberately narrow: a shell argv (no wrapper, no in-sandbox timeout — the
+// caller's ctx is the only lifetime bound), an initial working directory and
+// a starting TTY size.
+type SessionTerminalOptions struct {
+	// Shell is the argv to exec, e.g. []string{"bash", "-l"}. When empty the
+	// provider picks its default login shell.
+	Shell []string
+
+	// WorkDir is the initial working directory. Empty means the provider
+	// default (/workspace for Docker).
+	WorkDir string
+
+	// Cols and Rows seed the pseudo-terminal size; the frontend resizes over
+	// the stream as the panel changes.
+	Cols uint16
+	Rows uint16
+}
+
+// SessionTerminalSession is one live interactive terminal bound to the
+// session's sandbox. Read returns raw PTY output bytes (the provider runs the
+// process with a TTY, so output is a single unmultiplexed stream) and blocks
+// until data arrives or the terminal closes (io.EOF). Write feeds stdin.
+// Resize and Write are safe to call concurrently with Read.
+type SessionTerminalSession interface {
+	Read(p []byte) (int, error)
+	Write(p []byte) (int, error)
+	Resize(cols, rows uint16) error
+	// Close tears the terminal down immediately. The exec process dies with
+	// the connection; Wait unblocks afterwards.
+	Close() error
+	// Wait blocks until the terminal process exits or ctx is done, and
+	// reports the exit code. Callers that Close first observe a provider
+	// specific non-zero code.
+	Wait(ctx context.Context) (int, error)
+}
+
+// SessionTerminalProvider opens interactive terminals inside the session's
+// sandbox. It is the streaming counterpart of SessionShellExecutor: same
+// session binding and account contract, but a live PTY instead of a one-shot
+// aggregate result.
+type SessionTerminalProvider interface {
+	OpenSessionTerminal(
+		ctx context.Context,
+		sessionID string,
+		opts SessionTerminalOptions,
+	) (SessionTerminalSession, error)
+}
+
+// SessionTerminalCapabilityProvider is implemented by managers that MAY offer
+// interactive terminals. Like every other capability accessor it returns nil
+// when the active backend cannot honour the capability (today: backends
+// without a PTY-capable transport), so callers degrade to one-shot exec
+// instead of failing.
+type SessionTerminalCapabilityProvider interface {
+	SessionTerminalProvider() SessionTerminalProvider
+}

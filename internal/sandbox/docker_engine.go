@@ -54,6 +54,12 @@ type dockerEngineAPI interface {
 	ExecAttach(ctx context.Context, execID string, options client.ExecAttachOptions) (client.ExecAttachResult, error)
 	ExecInspect(ctx context.Context, execID string, options client.ExecInspectOptions) (client.ExecInspectResult, error)
 
+	// ExecResize relayouts the pseudo-terminal of a live exec. It serves only
+	// the interactive terminal; one-shot execs never allocate a TTY.
+	ExecResize(
+		ctx context.Context, execID string, options client.ExecResizeOptions,
+	) (client.ExecResizeResult, error)
+
 	// ContainerStatPath is the one archive endpoint this adapter uses, and only
 	// against the activity marker's fixed path. The copy endpoints are
 	// deliberately absent: they run as root and resolve symlinks, so exposing
