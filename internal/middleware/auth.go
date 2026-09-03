@@ -143,6 +143,8 @@ func Auth(
 			return
 		}
 
+		promoteWebSocketQueryHeaders(c)
+
 		// 尝试JWT Token认证
 		bearerPresented := false
 		if token, ok := bearerToken(c); ok {
@@ -181,12 +183,61 @@ func Auth(
 }
 
 // bearerToken extracts the Bearer token from the Authorization header.
+//
+// Browser WebSocket handshakes cannot carry custom headers, so the sandbox
+// workbench terminal sends its JWT as a "bearer.<token>" WebSocket
+// sub-protocol instead. The value is promoted to the regular Authorization
+// header here — before any credential checks — and stripped from the request
+// so it is not echoed by downstream logging or echoed back in the 101
+// response. The token never appears in a URL, which is exactly why this beats
+// a query-string token.
 func bearerToken(c *gin.Context) (string, bool) {
 	authHeader := c.GetHeader("Authorization")
 	if authHeader == "" || !strings.HasPrefix(authHeader, "Bearer ") {
+		if token, ok := websocketBearerProtocolToken(c); ok {
+			return token, true
+		}
 		return "", false
 	}
 	return strings.TrimPrefix(authHeader, "Bearer "), true
+}
+
+// websocketBearerProtocolToken promotes "bearer.<token>" from the
+// Sec-WebSocket-Protocol header. It only fires when no Authorization header
+// is present, so ordinary API calls are completely unaffected.
+func websocketBearerProtocolToken(c *gin.Context) (string, bool) {
+	protocols := c.Request.Header.Values("Sec-Websocket-Protocol")
+	for _, headerValue := range protocols {
+		for _, candidate := range strings.Split(headerValue, ",") {
+			candidate = strings.TrimSpace(candidate)
+			if !strings.HasPrefix(candidate, "bearer.") {
+				continue
+			}
+			token := strings.TrimPrefix(candidate, "bearer.")
+			if token == "" {
+				continue
+			}
+			c.Request.Header.Set("Authorization", "Bearer "+token)
+			c.Request.Header.Del("Sec-Websocket-Protocol")
+			return token, true
+		}
+	}
+	return "", false
+}
+
+// promoteWebSocketQueryHeaders bridges the headers a browser WebSocket
+// handshake cannot carry. The sandbox workbench terminal passes its active
+// workspace as a tenant_id query parameter; promoting it into X-Tenant-ID
+// before tenant resolution means a switched workspace keeps working over the
+// terminal. Only a WebSocket upgrade is affected, and an explicit header
+// always wins.
+func promoteWebSocketQueryHeaders(c *gin.Context) {
+	if !strings.EqualFold(c.GetHeader("Upgrade"), "websocket") {
+		return
+	}
+	if tenantID := c.Query("tenant_id"); tenantID != "" && c.GetHeader("X-Tenant-ID") == "" {
+		c.Request.Header.Set("X-Tenant-ID", tenantID)
+	}
 }
 
 // authenticateJWTUser finishes authentication for a validated JWT user:
