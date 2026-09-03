@@ -26,7 +26,17 @@
     </div>
     <t-tabs v-else v-model="activeTab" class="workbench-tabs">
       <t-tab-panel value="terminal" label="终端">
-        <section class="terminal-panel">
+        <SandboxTerminal
+          v-if="info?.interactive"
+          ref="interactiveTerminal"
+          :session-id="sessionId"
+          :backend="info.backend"
+          :visible="visible"
+        />
+        <section v-else class="terminal-panel">
+          <div class="terminal-mode-hint">
+            当前 {{ info?.backend }} 后端不支持交互式终端，已降级为命令模式：每条命令独立执行并返回聚合输出。
+          </div>
           <div ref="terminalOutputEl" class="terminal-output" role="log" aria-live="polite">
             <div v-if="!terminalLines.length" class="terminal-placeholder">
               终端命令将在会话绑定的 {{ info?.backend }} 沙箱内执行。
@@ -62,6 +72,18 @@
             <t-button size="small" variant="outline" @click="uploadInput?.click()"><template #icon><t-icon name="upload" /></template>上传</t-button>
             <t-button size="small" variant="text" :loading="filesLoading" @click="loadFiles"><template #icon><t-icon name="refresh" /></template>刷新</t-button>
           </div>
+          <nav v-if="currentDir" class="files-breadcrumbs" aria-label="目录路径">
+            <t-button size="small" variant="text" shape="square" title="返回上级" @click="navigateTo(parentDir(currentDir))">
+              <template #icon><t-icon name="arrow-up" /></template>
+            </t-button>
+            <t-button size="small" variant="text" @click="navigateTo('')">output</t-button>
+            <template v-for="(segment, index) in currentDir.split('/')" :key="index">
+              <span class="crumb-separator">/</span>
+              <t-button size="small" variant="text" @click="navigateTo(currentDir.split('/').slice(0, index + 1).join('/'))">
+                {{ segment }}
+              </t-button>
+            </template>
+          </nav>
           <div v-if="filesLoading" class="workbench-state"><t-loading /> 正在读取文件…</div>
           <div v-else-if="!files.length" class="workbench-state workbench-state--empty">
             <t-icon name="folder-open" size="30px" />
@@ -69,16 +91,16 @@
           </div>
           <ul v-else class="workbench-file-list">
             <li v-for="file in files" :key="file.path" class="workbench-file-row">
-              <button class="file-main" type="button" :disabled="file.type !== 'file'" @click="previewFile(file)">
-                <t-icon :name="file.type === 'dir' ? 'folder' : getFileIcon(file.name)" />
-                <span class="file-name" :title="file.path">{{ file.path }}</span>
-                <span class="file-size">{{ formatBytes(file.size) }}</span>
+              <button class="file-main" type="button" :disabled="file.type === 'other'" @click="openEntry(file)">
+                <t-icon :name="file.type === 'dir' ? 'folder-open' : getFileIcon(file.name)" />
+                <span class="file-name" :title="file.path">{{ file.type === 'dir' ? `${file.path}/` : file.path }}</span>
+                <span class="file-size">{{ file.type === 'dir' ? '目录' : formatBytes(file.size) }}</span>
               </button>
               <div class="file-actions" v-if="file.type === 'file'">
-                <t-button size="small" variant="text" shape="square" title="预览" @click="previewFile(file)"><template #icon><t-icon name="browse" /></template></t-button>
-                <t-button size="small" variant="text" shape="square" title="下载" @click="downloadFile(file)"><template #icon><t-icon name="download" /></template></t-button>
-                <t-button size="small" variant="text" shape="square" title="重命名" @click="renameFile(file)"><template #icon><t-icon name="edit-1" /></template></t-button>
-                <t-button size="small" variant="text" shape="square" theme="danger" title="删除" @click="deleteFile(file)"><template #icon><t-icon name="delete" /></template></t-button>
+                <t-button size="small" variant="text" shape="square" title="预览" @click.stop="previewFile(file)"><template #icon><t-icon name="browse" /></template></t-button>
+                <t-button size="small" variant="text" shape="square" title="下载" @click.stop="downloadFile(file)"><template #icon><t-icon name="download" /></template></t-button>
+                <t-button size="small" variant="text" shape="square" title="重命名" @click.stop="renameFile(file)"><template #icon><t-icon name="edit-1" /></template></t-button>
+                <t-button size="small" variant="text" shape="square" theme="danger" title="删除" @click.stop="deleteFile(file)"><template #icon><t-icon name="delete" /></template></t-button>
               </div>
             </li>
           </ul>
@@ -132,6 +154,7 @@ import { MessagePlugin } from 'tdesign-vue-next'
 import VueOfficePptx from '@vue-office/pptx'
 import * as XLSX from 'xlsx'
 import { getFileIcon } from '@/utils/files'
+import SandboxTerminal from './SandboxTerminal.vue'
 import {
   deleteSandboxWorkbenchFile,
   downloadSandboxWorkbenchFile,
@@ -169,7 +192,11 @@ const unavailable = ref(false)
 const info = ref<SandboxWorkbenchInfo | null>(null)
 const files = ref<SandboxWorkbenchFile[]>([])
 const filesLoading = ref(false)
+// currentDir is the browsed subdirectory relative to /workspace/output.
+// Empty string is the artifact root itself.
+const currentDir = ref('')
 const uploadInput = ref<HTMLInputElement | null>(null)
+const interactiveTerminal = ref<InstanceType<typeof SandboxTerminal> | null>(null)
 const terminalOutputEl = ref<HTMLElement | null>(null)
 const terminalLines = ref<TerminalLine[]>([])
 const command = ref('')
@@ -190,6 +217,7 @@ async function loadInfo() {
   if (!props.sessionId) return
   initialLoading.value = true
   unavailable.value = false
+  currentDir.value = ''
   try {
     const response = await getSandboxWorkbenchInfo(props.sessionId)
     info.value = response.data
@@ -206,13 +234,35 @@ async function loadFiles() {
   if (!props.sessionId || !info.value?.files) return
   filesLoading.value = true
   try {
-    const response = await listSandboxWorkbenchFiles(props.sessionId)
+    const response = await listSandboxWorkbenchFiles(props.sessionId, currentDir.value)
     files.value = Array.isArray(response.data) ? response.data : []
   } catch (error: any) {
     MessagePlugin.error(error?.message || '读取沙箱文件失败')
   } finally {
     filesLoading.value = false
   }
+}
+
+function openEntry(file: SandboxWorkbenchFile) {
+  if (file.type === 'dir') {
+    void navigateTo(file.path)
+  } else {
+    void previewFile(file)
+  }
+}
+
+async function navigateTo(dir: string) {
+  if (currentDir.value === dir) {
+    void loadFiles()
+    return
+  }
+  currentDir.value = dir
+  await loadFiles()
+}
+
+function parentDir(dir: string) {
+  const index = dir.lastIndexOf('/')
+  return index > 0 ? dir.slice(0, index) : ''
 }
 
 function appendTerminal(kind: TerminalLine['kind'], text: string) {
@@ -384,6 +434,9 @@ onUnmounted(() => {
 .workbench-state { min-height: 180px; display: flex; align-items: center; justify-content: center; gap: 10px; color: var(--td-text-color-secondary); }
 .workbench-state--empty { flex-direction: column; text-align: center; }
 .terminal-panel, .files-panel, .preview-panel { height: 100%; min-height: 0; display: flex; flex-direction: column; padding-top: 12px; }
+.terminal-mode-hint { margin-bottom: 10px; padding: 8px 12px; border-radius: 6px; background: var(--td-bg-color-secondarycontainer); color: var(--td-text-color-secondary); font-size: 12px; }
+.files-breadcrumbs { display: flex; align-items: center; gap: 2px; min-height: 32px; border-bottom: 1px solid var(--td-component-stroke); color: var(--td-text-color-secondary); }
+.crumb-separator { color: var(--td-text-color-placeholder); }
 .terminal-output { flex: 1; min-height: 360px; overflow: auto; padding: 16px; border-radius: 8px; background: #101418; color: #d7e0e7; font: 13px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
 .terminal-placeholder { color: #80909b; }
 .terminal-line--command { color: #66d9a7; margin-top: 8px; }
