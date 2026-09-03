@@ -80,10 +80,16 @@ function dataRow(values, widths) {
     children: values.map((t, i) => cell(t, widths[i])),
   });
 }
-function shot(name, caption, widthPx) {
-  // 1600x950 screenshots; embed at ~440pt wide, keep the 1.6842 ratio.
-  const w = widthPx || 440;
-  const h = Math.round(w / (1600 / 950));
+function pngSize(path) {
+  const buf = fs.readFileSync(path);
+  return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+}
+
+function shot(name, caption, widthPt) {
+  // Read the real pixel size so the aspect ratio is always preserved.
+  const { w, h } = pngSize(SHOT + name);
+  const width = widthPt || 300;
+  const height = Math.round((width * h) / w);
   return [
     new Paragraph({
       alignment: AlignmentType.CENTER,
@@ -92,7 +98,7 @@ function shot(name, caption, widthPx) {
       children: [new ImageRun({
         type: "png",
         data: fs.readFileSync(SHOT + name),
-        transformation: { width: w, height: h },
+        transformation: { width, height },
       })],
     }),
     new Paragraph({

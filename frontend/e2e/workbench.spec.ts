@@ -196,7 +196,7 @@ test.describe('sandbox workbench drawer', () => {
     // The FitAddon fires an initial resize once the socket is open.
     expect(resizeFrames).toBeGreaterThanOrEqual(1)
 
-    await page.screenshot({ path: `${SHOT_DIR}/terminal-interactive.png` })
+    await page.locator('.sandbox-workbench-drawer .t-drawer__content-wrapper').screenshot({ path: `${SHOT_DIR}/terminal-interactive.png` })
 
     // Sanity: capability payload reached the drawer (backend badge).
     await expect(page.getByText('docker', { exact: true })).toBeVisible()
@@ -217,7 +217,7 @@ test.describe('sandbox workbench drawer', () => {
     await expect(statusBadge).toBeVisible({ timeout: 15_000 })
     await expect(statusBadge).toContainText('达到时长上限')
     await expect(statusBadge).toContainText('退出码 0')
-    await page.screenshot({ path: `${SHOT_DIR}/terminal-exit.png` })
+    await page.locator('.sandbox-workbench-drawer .t-drawer__content-wrapper').screenshot({ path: `${SHOT_DIR}/terminal-exit.png` })
   })
 
   test('degrades to command mode when the backend has no PTY', async ({ page }) => {
@@ -235,7 +235,7 @@ test.describe('sandbox workbench drawer', () => {
     await expect(page.getByText('[退出码 0 · 12 ms]')).toBeVisible()
     expect(api.execRequests).toContain('ls -la /workspace/output')
 
-    await page.screenshot({ path: `${SHOT_DIR}/terminal-degraded.png` })
+    await page.locator('.sandbox-workbench-drawer .t-drawer__content-wrapper').screenshot({ path: `${SHOT_DIR}/terminal-degraded.png` })
   })
 
   test('file manager lists, navigates directories and returns via breadcrumb', async ({ page }) => {
@@ -259,7 +259,7 @@ test.describe('sandbox workbench drawer', () => {
     await expect(page.getByText('产物目录 · 6 项')).toBeVisible()
     expect(api.listRequests.filter(path => path === '').length).toBeGreaterThanOrEqual(2)
 
-    await page.screenshot({ path: `${SHOT_DIR}/files-navigation.png` })
+    await page.locator('.sandbox-workbench-drawer .t-drawer__content-wrapper').screenshot({ path: `${SHOT_DIR}/files-navigation.png` })
   })
 
   test('html artifact previews inside a sandboxed iframe without same-origin', async ({ page }) => {
@@ -280,7 +280,7 @@ test.describe('sandbox workbench drawer', () => {
     expect(sandboxAttr).toContain('allow-scripts')
     expect(sandboxAttr).not.toContain('allow-same-origin')
 
-    await page.screenshot({ path: `${SHOT_DIR}/preview-html.png` })
+    await page.locator('.sandbox-workbench-drawer .t-drawer__content-wrapper').screenshot({ path: `${SHOT_DIR}/preview-html.png` })
   })
 
   test('csv artifact renders as a read-only sheet view', async ({ page }) => {
@@ -296,7 +296,7 @@ test.describe('sandbox workbench drawer', () => {
     await expect(page.locator('.sheet-table').getByText('42')).toBeVisible()
     expect(api.contentRequests).toContain('sales.csv')
 
-    await page.screenshot({ path: `${SHOT_DIR}/preview-csv.png` })
+    await page.locator('.sandbox-workbench-drawer .t-drawer__content-wrapper').screenshot({ path: `${SHOT_DIR}/preview-csv.png` })
   })
 
   test('shows the empty state when the session has no live sandbox', async ({ page }) => {
@@ -304,6 +304,6 @@ test.describe('sandbox workbench drawer', () => {
     await openWorkbench(page, 'e2e-none')
 
     await expect(page.getByText('当前会话还没有可用沙箱')).toBeVisible()
-    await page.screenshot({ path: `${SHOT_DIR}/empty-state.png` })
+    await page.locator('.sandbox-workbench-drawer .t-drawer__content-wrapper').screenshot({ path: `${SHOT_DIR}/empty-state.png` })
   })
 })
