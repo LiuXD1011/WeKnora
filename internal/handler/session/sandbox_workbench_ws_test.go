@@ -88,7 +88,21 @@ func (t *wsTerminalSession) Close() error {
 	return nil
 }
 
-func (t *wsTerminalSession) Wait(context.Context) (int, error) { return 0, nil }
+func (t *wsTerminalSession) Wait(ctx context.Context) (int, error) {
+	for {
+		t.mu.Lock()
+		closed := t.closed
+		t.mu.Unlock()
+		if closed {
+			return 0, nil
+		}
+		select {
+		case <-ctx.Done():
+			return -1, ctx.Err()
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+}
 
 type wsTerminalProvider struct {
 	mu       sync.Mutex
@@ -99,7 +113,9 @@ func (p *wsTerminalProvider) OpenSessionTerminal(
 	ctx context.Context, _ string, opts sandbox.SessionTerminalOptions,
 ) (sandbox.SessionTerminalSession, error) {
 	session := &wsTerminalSession{}
+	p.mu.Lock()
 	p.sessions = append(p.sessions, session)
+	p.mu.Unlock()
 	if _, ok := ctx.Deadline(); !ok {
 		return nil, context.DeadlineExceeded
 	}
@@ -127,10 +143,13 @@ func (m *wsManager) SessionTerminalProvider() sandbox.SessionTerminalProvider {
 
 type wsAudit struct {
 	interfaces.AuditLogService
+	mu      sync.Mutex
 	entries []*types.AuditLog
 }
 
 func (a *wsAudit) Log(_ context.Context, entry *types.AuditLog) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	a.entries = append(a.entries, entry)
 	return nil
 }
@@ -229,11 +248,18 @@ func TestTerminalWorkbenchWSRoundTrip(t *testing.T) {
 	require.Eventually(t, func() bool {
 		provider.mu.Lock()
 		defer provider.mu.Unlock()
-		return len(provider.sessions) == 1 && len(provider.sessions[0].resizes) == 1 &&
+		if len(provider.sessions) != 1 {
+			return false
+		}
+		provider.sessions[0].mu.Lock()
+		defer provider.sessions[0].mu.Unlock()
+		return len(provider.sessions[0].resizes) == 1 &&
 			provider.sessions[0].resizes[0] == [2]uint16{120, 40}
 	}, 5*time.Second, 50*time.Millisecond)
 
 	require.Eventually(t, func() bool {
+		audit.mu.Lock()
+		defer audit.mu.Unlock()
 		return len(audit.entries) >= 2 &&
 			audit.entries[0].Action == "sandbox.terminal_opened" &&
 			audit.entries[1].Action == "sandbox.terminal_command" &&
@@ -245,7 +271,12 @@ func TestTerminalWorkbenchWSRoundTrip(t *testing.T) {
 	require.Eventually(t, func() bool {
 		provider.mu.Lock()
 		defer provider.mu.Unlock()
-		return len(provider.sessions) == 1 && provider.sessions[0].closed
+		if len(provider.sessions) != 1 {
+			return false
+		}
+		provider.sessions[0].mu.Lock()
+		defer provider.sessions[0].mu.Unlock()
+		return provider.sessions[0].closed
 	}, 5*time.Second, 50*time.Millisecond)
 
 	mu.Lock()

@@ -5,9 +5,9 @@
 // endpoint pumps browser keystrokes through. It differs from Exec in three
 // deliberate ways:
 //
-//   - No wrapper, no in-container timeout. The wrapper's `timeout -s KILL`
-//     would murder a shell the user is still typing into; the terminal's
-//     lifetime is the caller's context (the broker's lease), nothing else.
+//   - A fixed bootstrap reports the kernel process/session identity before
+//     executing the shell. Context cancellation and Close explicitly clean
+//     up this process scope; dropping Docker's attach alone does not kill it.
 //   - TTY mode means the stream is raw. One-shot execs demultiplex stdout and
 //     stderr with stdcopy; a TTY merges them by definition, so the session
 //     reads the hijacked connection directly.
@@ -19,7 +19,10 @@ package sandbox
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -30,7 +33,7 @@ import (
 
 // dockerTerminalPollInterval bounds how often Wait re-inspects the exec while
 // the foreground process is still running.
-const dockerTerminalPollInterval = 750 * time.Millisecond
+const dockerTerminalPollInterval = 100 * time.Millisecond
 
 // ExecStream opens an interactive TTY exec inside the sandbox and returns it
 // as a streaming terminal session. DockerRemoteClient satisfies
@@ -53,11 +56,18 @@ func (c *DockerRemoteClient) ExecStream(
 		initialSize = client.ConsoleSize{Height: uint(req.Rows), Width: uint(req.Cols)}
 	}
 
+	tokenBytes := make([]byte, 16)
+	if _, err := rand.Read(tokenBytes); err != nil {
+		return nil, err
+	}
+	token := hex.EncodeToString(tokenBytes)
+	argv := append([]string{"/bin/sh", "-c", dockerTerminalBootstrap, "weknora-terminal"}, req.Command...)
+	env := append(append([]string(nil), req.Env...), "WEKNORA_TERMINAL_ID="+token)
 	execOpts := client.ExecCreateOptions{
-		Cmd:          req.Command,
+		Cmd:          argv,
 		User:         dockerExecUser(req.User),
 		WorkingDir:   req.WorkDir,
-		Env:          req.Env,
+		Env:          env,
 		TTY:          true,
 		AttachStdin:  true,
 		AttachStdout: true,
@@ -85,20 +95,51 @@ func (c *DockerRemoteClient) ExecStream(
 		return nil, dockerError("ExecStream", err)
 	}
 
-	return &dockerTerminalSession{
-		api:       c.api,
-		execID:    created.ID,
-		reader:    attached.Reader,
-		conn:      attached.Conn,
-		pollEvery: dockerTerminalPollInterval,
-	}, nil
+	// Bound bootstrap reads independently; clear the transport deadline before
+	// handing a long-lived terminal to the broker.
+	_ = attached.Conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	pid, sid, started, err := readDockerTerminalIdentity(attached.Reader)
+	_ = attached.Conn.SetReadDeadline(time.Time{})
+	if err != nil {
+		attached.Close()
+		// Even if the handshake was interrupted, the random inherited marker
+		// identifies the process we just launched without trusting a PID file.
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		_, _ = c.Exec(cleanupCtx, handle, RemoteExecRequest{
+			Command: dockerTerminalCleanupCommand("", "", "", token),
+			Shell:   true, User: dockerExecUser(req.User), Timeout: 5 * time.Second,
+		})
+		return nil, dockerError("ExecStream", err)
+	}
+	terminal := &dockerTerminalSession{
+		api: c.api, owner: c, handle: handle, user: dockerExecUser(req.User),
+		execID: created.ID, reader: attached.Reader, conn: attached.Conn,
+		pollEvery: dockerTerminalPollInterval, pid: pid, sid: sid,
+		started: started, token: token, done: make(chan struct{}),
+	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = terminal.Close()
+		case <-terminal.done:
+		}
+	}()
+	return terminal, nil
 }
 
 // dockerTerminalSession is one live PTY exec. Read is owned by the output
 // pump, Write/Resize by the input pump; the hijacked connection tolerates
 // that concurrency, and ExecResize is an independent HTTP call.
 type dockerTerminalSession struct {
-	api dockerEngineAPI
+	api                      dockerEngineAPI
+	owner                    *DockerRemoteClient
+	handle                   RemoteSandboxHandle
+	user                     string
+	pid, sid, started, token string
+	done                     chan struct{}
+	closeOnce                sync.Once
+	closeErr                 error
 	// reader carries the raw merged TTY output (the hijack's stream side);
 	// conn carries stdin and the close path.
 	reader    io.Reader
@@ -135,14 +176,27 @@ func (t *dockerTerminalSession) Resize(cols, rows uint16) error {
 }
 
 func (t *dockerTerminalSession) Close() error {
-	t.mu.Lock()
-	if t.closed {
+	t.closeOnce.Do(func() {
+		t.mu.Lock()
+		t.closed = true
 		t.mu.Unlock()
-		return nil
-	}
-	t.closed = true
-	t.mu.Unlock()
-	return t.conn.Close()
+		// Closing the hijack only disconnects stdin/stdout; Docker does NOT
+		// kill the exec. Explicitly terminate its verified process scope.
+		_ = t.conn.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		result, err := t.owner.Exec(ctx, t.handle, RemoteExecRequest{
+			Command: dockerTerminalCleanupCommand(t.pid, t.sid, t.started, t.token),
+			Shell:   true, User: t.user, Timeout: 5 * time.Second,
+		})
+		if err != nil {
+			t.closeErr = err
+		} else if result.ExitCode != 0 {
+			t.closeErr = fmt.Errorf("terminal cleanup exited %d: %s", result.ExitCode, result.Stderr)
+		}
+		close(t.done)
+	})
+	return t.closeErr
 }
 
 // Wait polls ExecInspect until the terminal process exits. Closing the

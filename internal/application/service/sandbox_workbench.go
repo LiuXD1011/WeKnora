@@ -553,6 +553,9 @@ type WorkbenchTerminal struct {
 	ID      string
 	Backend string
 	Session sandbox.SessionTerminalSession
+	// Context carries the actual lease, not just the HTTP request lifetime.
+	// Transport pumps must observe it even while the browser sends no input.
+	Context context.Context
 
 	closeOnce sync.Once
 	closeFunc func(reason string, exitCode int)
@@ -644,9 +647,10 @@ func (s *SandboxWorkbenchService) OpenTerminal(
 		ID:      newTerminalID(),
 		Backend: string(backend),
 		Session: terminalSession,
+		Context: leaseCtx,
 	}
 	terminal.closeFunc = func(reason string, exitCode int) {
-		_ = terminalSession.Close()
+		cleanupErr := terminalSession.Close()
 		cancelLease()
 		s.terminalsMu.Lock()
 		if s.terminalCounts[sessionID] > 0 {
@@ -656,10 +660,18 @@ func (s *SandboxWorkbenchService) OpenTerminal(
 			delete(s.terminalCounts, sessionID)
 		}
 		s.terminalsMu.Unlock()
-		s.auditTerminalEvent(ctx, session, "sandbox.terminal_closed", terminal.ID, map[string]any{
+		// Disconnection/expiry has often cancelled ctx already. Keep actor and
+		// tenant values but give persistence an independent bounded deadline.
+		auditCtx, cancelAudit := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+		defer cancelAudit()
+		details := map[string]any{
 			"reason":    reason,
 			"exit_code": exitCode,
-		})
+		}
+		if cleanupErr != nil {
+			details["cleanup_error"] = cleanupErr.Error()
+		}
+		s.auditTerminalEvent(auditCtx, session, "sandbox.terminal_closed", terminal.ID, details)
 	}
 	s.auditTerminalEvent(leaseCtx, session, "sandbox.terminal_opened", terminal.ID, map[string]any{
 		"backend":       terminal.Backend,
@@ -669,6 +681,14 @@ func (s *SandboxWorkbenchService) OpenTerminal(
 	})
 
 	go s.keepTerminalAlive(leaseCtx, sessionID, terminal.ID)
+	go func() {
+		<-leaseCtx.Done()
+		reason := "context_cancelled"
+		if errors.Is(leaseCtx.Err(), context.DeadlineExceeded) {
+			reason = "lease_expired"
+		}
+		terminal.Close(reason, -1)
+	}()
 	return terminal, nil
 }
 
@@ -736,12 +756,21 @@ func (s *SandboxWorkbenchService) auditTerminalEvent(
 	}
 	detailsJSON, _ := json.Marshal(details)
 	actor, _ := types.UserIDFromContext(ctx)
+	outcome := types.AuditOutcomeSuccess
+	if action == "sandbox.terminal_closed" {
+		if code, ok := details["exit_code"].(int); ok && code != 0 {
+			outcome = types.AuditOutcomeFailed
+		}
+		if details["cleanup_error"] != nil {
+			outcome = types.AuditOutcomeFailed
+		}
+	}
 	_ = s.audit.Log(ctx, &types.AuditLog{
 		TenantID: session.TenantID, ActorUserID: actor,
 		ActorRole: string(types.TenantRoleFromContext(ctx)),
 		Action:    types.AuditAction(action),
 		ScopeType: "session", ScopeID: session.ID,
 		TargetType: "sandbox_terminal", TargetID: terminalID,
-		Outcome: types.AuditOutcomeSuccess, Details: types.JSON(detailsJSON),
+		Outcome: outcome, Details: types.JSON(detailsJSON),
 	})
 }

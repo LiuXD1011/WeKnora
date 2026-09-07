@@ -140,22 +140,6 @@ func (s *terminalInputSniffer) report(interrupted bool) {
 	s.workbench.AuditTerminalInput(s.ctx, s.sessionID, s.terminalID, line, interrupted)
 }
 
-// terminalTermination records the first termination reason any pump observed,
-// so the exit event and the audit trail say what actually ended the terminal
-// rather than whichever pump happened to unwind last.
-type terminalTermination struct {
-	once  sync.Once
-	value string
-}
-
-func newTerminalTermination(defaultReason string) *terminalTermination {
-	return &terminalTermination{value: defaultReason}
-}
-
-func (t *terminalTermination) set(reason string) {
-	t.once.Do(func() { t.value = reason })
-}
-
 // TerminalSandboxWorkbenchWS upgrades to the interactive terminal stream. The
 // connection is bidirectional: binary frames carry raw PTY bytes in both
 // directions, text frames carry the control protocol (resize/ping inbound,
@@ -168,125 +152,171 @@ func (h *Handler) TerminalSandboxWorkbenchWS(c *gin.Context) {
 		return
 	}
 	sessionID := workbenchSessionID(c)
-
 	conn, err := workbenchTerminalUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		// Upgrade already wrote the HTTP error response.
 		return
 	}
 	defer conn.Close()
+	conn.SetReadLimit(workbenchTerminalWSFrameLimit)
+	streamCtx, cancelStream := context.WithCancel(c.Request.Context())
+	defer cancelStream()
 
 	cols, rows := parseTerminalSize(c.Query("cols"), c.Query("rows"))
-	terminal, err := workbench.OpenTerminal(c.Request.Context(), sessionID, cols, rows)
+	terminal, err := workbench.OpenTerminal(streamCtx, sessionID, cols, rows)
 	if err != nil {
 		writeWorkbenchWSError(conn, err)
 		return
 	}
 
-	writeMu := &sync.Mutex{}
-	writeText := func(message workbenchWSMessage) error {
+	var writeMu sync.Mutex
+	write := func(kind int, payload []byte) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
-		return conn.WriteJSON(message)
+		if err := conn.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			return err
+		}
+		return conn.WriteMessage(kind, payload)
 	}
-	writeBinary := func(data []byte) error {
-		writeMu.Lock()
-		defer writeMu.Unlock()
-		return conn.WriteMessage(websocket.BinaryMessage, data)
+	writeText := func(event workbenchWSMessage) error {
+		payload, err := json.Marshal(event)
+		if err != nil {
+			return err
+		}
+		return write(websocket.TextMessage, payload)
 	}
-
 	if err := writeText(workbenchWSMessage{Type: "ready", TerminalID: terminal.ID, Backend: terminal.Backend}); err != nil {
 		terminal.Close("write_failed", -1)
 		return
 	}
 
-	termination := newTerminalTermination("process_exit")
-
-	// Output pump: PTY → browser. EOF (or a dead browser connection) ends it.
-	outputDone := make(chan struct{})
+	// Exactly one reader and one serialised writer own each socket direction.
+	// The handler selects process completion/lease/disconnect instead of
+	// blocking inside ReadMessage until the browser next sends a frame.
+	inputDone := make(chan string, 1)
+	inputStopped := make(chan struct{})
 	go func() {
-		defer close(outputDone)
+		defer close(inputStopped)
+		sniffer := &terminalInputSniffer{workbench: workbench, ctx: streamCtx,
+			sessionID: sessionID, terminalID: terminal.ID}
+		defer sniffer.flush()
+		for {
+			conn.SetReadDeadline(time.Now().Add(workbenchTerminalReadDeadline))
+			kind, payload, readErr := conn.ReadMessage()
+			if readErr != nil {
+				reason := "client_disconnect"
+				if stderrors.Is(readErr, websocket.ErrReadLimit) {
+					reason = "frame_too_large"
+				}
+				inputDone <- reason
+				return
+			}
+			switch kind {
+			case websocket.BinaryMessage:
+				if _, err := terminal.Session.Write(payload); err != nil {
+					inputDone <- "backend_error"
+					return
+				}
+				sniffer.feed(payload)
+			case websocket.TextMessage:
+				var event workbenchWSMessage
+				if json.Unmarshal(payload, &event) != nil {
+					continue
+				}
+				switch event.Type {
+				case "resize":
+					if event.Cols > 0 && event.Rows > 0 && event.Cols <= 1024 && event.Rows <= 1024 {
+						if err := terminal.Session.Resize(event.Cols, event.Rows); err != nil {
+							inputDone <- "backend_error"
+							return
+						}
+					}
+				case "ping":
+					if err := writeText(workbenchWSMessage{Type: "pong", Seq: event.Seq}); err != nil {
+						inputDone <- "connection_lost"
+						return
+					}
+				}
+			}
+		}
+	}()
+
+	outputDone := make(chan error, 1)
+	go func() {
 		buf := make([]byte, 16<<10)
 		for {
 			n, readErr := terminal.Session.Read(buf)
 			if n > 0 {
-				if writeErr := writeBinary(buf[:n]); writeErr != nil {
-					termination.set("connection_lost")
+				if err := write(websocket.BinaryMessage, buf[:n]); err != nil {
+					outputDone <- err
 					return
 				}
 			}
 			if readErr != nil {
-				if !stderrors.Is(readErr, io.EOF) {
-					termination.set("backend_error")
-				}
+				outputDone <- readErr
 				return
 			}
 		}
 	}()
-
-	// Wait pump: reports the process exit code, or -1 when the lease (or any
-	// other context cancellation) ended the terminal first.
-	waitDone := make(chan int, 1)
+	type waitResult struct {
+		code int
+		err  error
+	}
+	waitDone := make(chan waitResult, 1)
 	go func() {
-		code, waitErr := terminal.Session.Wait(c.Request.Context())
-		if waitErr != nil {
-			termination.set("lease_expired")
-			waitDone <- -1
-			return
-		}
-		waitDone <- code
+		code, err := terminal.Session.Wait(terminal.Context)
+		waitDone <- waitResult{code, err}
 	}()
 
-	// Input pump: browser → PTY. It runs on the handler goroutine and is the
-	// clock that keeps the read deadline refreshed; when it ends, the PTY is
-	// torn down so Wait cannot hang on a lease the client abandoned.
-	sniffer := &terminalInputSniffer{
-		workbench:  workbench,
-		ctx:        c.Request.Context(),
-		sessionID:  sessionID,
-		terminalID: terminal.ID,
-	}
-	defer sniffer.flush()
-
-inputLoop:
+	reason, exitCode := "process_exit", -1
+	outputFinished := false
+	outputEvents := outputDone
+waitLoop:
 	for {
-		conn.SetReadDeadline(time.Now().Add(workbenchTerminalReadDeadline))
-		messageType, payload, err := conn.ReadMessage()
-		if err != nil {
-			termination.set("client_disconnect")
-			break
-		}
-		switch messageType {
-		case websocket.BinaryMessage:
-			if len(payload) > workbenchTerminalWSFrameLimit {
-				continue
-			}
-			sniffer.feed(payload)
-			if _, err := terminal.Session.Write(payload); err != nil {
-				termination.set("backend_error")
-				break inputLoop
-			}
-		case websocket.TextMessage:
-			var event workbenchWSMessage
-			if json.Unmarshal(payload, &event) != nil {
-				continue
-			}
-			switch event.Type {
-			case "resize":
-				if event.Cols > 0 && event.Rows > 0 && event.Cols <= 1024 && event.Rows <= 1024 {
-					_ = terminal.Session.Resize(event.Cols, event.Rows)
+		select {
+		case result := <-waitDone:
+			exitCode = result.code
+			if result.err != nil {
+				reason = "backend_error"
+				if stderrors.Is(terminal.Context.Err(), context.DeadlineExceeded) {
+					reason = "lease_expired"
+				} else if terminal.Context.Err() != nil {
+					reason = "context_cancelled"
 				}
-			case "ping":
-				_ = writeText(workbenchWSMessage{Type: "pong", Seq: event.Seq})
 			}
+			break waitLoop
+		case <-terminal.Context.Done():
+			reason = "context_cancelled"
+			if stderrors.Is(terminal.Context.Err(), context.DeadlineExceeded) {
+				reason = "lease_expired"
+			}
+			break waitLoop
+		case reason = <-inputDone:
+			break waitLoop
+		case outputErr := <-outputEvents:
+			outputFinished = true
+			outputEvents = nil
+			if !stderrors.Is(outputErr, io.EOF) {
+				reason = "backend_error"
+				break waitLoop
+			}
+			// EOF commonly arrives just before ExecInspect observes exit.
+			// Keep waiting for the authoritative code rather than assuming 0.
 		}
 	}
-
-	terminal.Close(termination.value, -1)
-	exitCode := <-waitDone
-	_ = writeText(workbenchWSMessage{Type: "exit", Code: exitCode, Reason: termination.value})
-	// The audit close entry wants the resolved outcome, so it closes last.
-	terminal.Close(termination.value, exitCode)
+	// For normal completion let already-buffered output drain before closing
+	// the PTY. A peer that stopped reading cannot hold this open indefinitely.
+	if reason == "process_exit" && !outputFinished {
+		select {
+		case <-outputDone:
+		case <-time.After(2 * time.Second):
+		}
+	}
+	// Record once, using the resolved outcome (not an earlier placeholder -1).
+	terminal.Close(reason, exitCode)
+	_ = writeText(workbenchWSMessage{Type: "exit", Code: exitCode, Reason: reason})
+	_ = conn.Close() // releases the input reader without waiting for its deadline
+	cancelStream()
+	<-inputStopped
 }
 
 func parseTerminalSize(colsRaw, rowsRaw string) (uint16, uint16) {

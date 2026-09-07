@@ -1,0 +1,7 @@
+# Minimal offline-friendly image for real Docker PTY/lifecycle conformance.
+# The production skill image remains docker/Dockerfile.sandbox.
+FROM ubuntu:22.04
+RUN groupadd -g 1000 user && useradd -u 1000 -g user -m -s /bin/bash user \
+    && mkdir -p /workspace/input /workspace/output && chown -R user:user /workspace
+USER user
+WORKDIR /workspace

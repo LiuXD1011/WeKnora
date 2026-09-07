@@ -73,9 +73,11 @@ DockerRemoteClient.ExecStream（TTY exec + ExecResize）
 - 文件 API 仅允许 `/workspace/output` 下的相对路径；绝对路径、反斜杠、空字节、`..` 穿越、经符号链接解析后越界的路径都在服务端拒绝（先词法清洗，再在沙箱内 `realpath -m` 复核）。
 - URL 编码的遍历在 HTTP 层解码后落入同一套检查；双重编码只是字面文件名，无法越界。
 - 所有读写、命令执行、终端打开都先走 `GetOwnedSession`，空间管理员也不能操作其他主体的会话沙箱。
-- 终端以 `DefaultSandboxExecUser` 运行（与模型执行同一账户契约），PTY exec 不经过超时包装命令——终端生命周期由租约决定。
+- 终端以 `DefaultSandboxExecUser` 运行（与模型执行同一账户契约）。Docker 的固定启动段先报告内核 PID、POSIX session ID 与启动时间，再执行 shell；标识头不发送到浏览器。终端没有一次性命令的 timeout 包装，生命周期由租约决定。
 - 单文件上传上限 20 MiB；终端命令超时上限 300 秒（命令模式）。
 - 每会话最多 2 个并发交互终端；终端租约 30 分钟，到期 PTY 随上下文终止，浏览器收到 `reason=lease_expired`。
+- Docker 关闭 attach 连接本身不会终止 exec。适配器使用内核身份与随机继承标记核对终端进程范围，显式清理进程与后台作业；另一个终端不受影响。清理错误进入关闭审计的 `cleanup_error` 字段，不伪装成成功。
+- WebSocket 在进程退出、租约结束、浏览器断开或异常帧到达时结束，不再等待下一次键盘输入。退出事件与单条关闭审计记录同一原因和实际退出码；后端故障不再误标为租约到期。关闭审计使用保留租户/操作者信息的独立短时上下文，避免断开连接后丢失记录。
 - 交互终端期间每 4 分钟经包装命令刷新一次 Docker 空闲回收的活动标记，避免挂着终端的容器被判定空闲回收。
 - HTML 预览使用不含 `allow-same-origin` 的 sandbox iframe；服务端内联响应另附加 CSP。
 - 审计：`sandbox.terminal_opened` / `sandbox.terminal_closed`（含原因与退出码）、`sandbox.terminal_command`（命令模式记录完整命令与结果；交互模式由输入流重建命令行，Ctrl-C 记为 `^C` 并标记 interrupted）、`sandbox.file_written` / `sandbox.file_renamed` / `sandbox.file_deleted`。
@@ -113,6 +115,19 @@ npx playwright test --config playwright.final.config.ts
 该浏览器套件增加恶意 HTML 验证：尝试读取父页面、Cookie、本地存储，移除策略 meta 后再发送 fetch/图片请求；断言读取均被拒绝且网络请求计数为零。原实现对此测试失败，修复后通过。测试报告写入 `frontend/e2e-artifacts/final-results.json`。
 
 Windows 上如开发服务器自动清理受进程权限影响，可在一个终端单独运行 `npm run dev -- --host 127.0.0.1 --port 8137 --strictPort`，再在另一个 PowerShell 终端设置 `$env:WEKNORA_E2E_EXTERNAL_SERVER='1'` 后运行上面的 Playwright 命令。测试结束后关闭该开发服务器。`WEKNORA_E2E_BASE_URL` 可覆盖外部服务器地址。
+
+### 真实 Docker 终端验收
+
+以下测试使用实际 Docker Engine 和真实 shell，不拦截后端接口。测试自行创建及清理无网络、64 MiB 内存、0.5 CPU 和 64 PID 上限的容器，不连接已有业务容器。测试镜像仅用于终端生命周期验证，不替代生产 Skill 镜像。
+
+```bash
+docker build --pull=false -f docker/Dockerfile.workbench-test -t weknora-workbench-test:20260907 docker
+WORKBENCH_INTEGRATION_IMAGE=weknora-workbench-test:20260907 \
+  go test -tags workbench_integration ./internal/sandbox \
+  -run 'TestDockerTerminal.*Integration' -count=1 -v -timeout 90s
+```
+
+覆盖主动关闭、取消、时长到期、脱离原进程组的后台作业、shell 正常退出后的子进程清理，以及 UID 1000、实时输出、Ctrl-C 返回 130、37×111 终端尺寸和并行终端互不影响。CPU/内存超限终止和跨租户授权验收需分别运行对应测试，不能用此套件替代。
 
 ## 已知限制
 

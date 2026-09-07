@@ -17,7 +17,7 @@ import (
 // exec, and Close/Wait settle the session.
 func TestExecStreamAllocatesPTYAndStreams(t *testing.T) {
 	engine := newFakeDockerEngine()
-	engine.execTTYOutput = "welcome\n"
+	engine.execTTYOutput = "\x1eweknora-terminal:42:42:999\x1fwelcome\n"
 	engine.execExit = 7
 	docker := newTestDockerClient(t, engine)
 
@@ -31,14 +31,15 @@ func TestExecStreamAllocatesPTYAndStreams(t *testing.T) {
 	require.NoError(t, err)
 	defer terminal.Close()
 
-	// The exec must be a TTY with stdin attached, running the requested argv
-	// (no /bin/sh wrapper, no timeout — that contract lives in Exec only),
+	// The exec must be a TTY with stdin attached. A fixed private bootstrap
+	// reports kernel identity, then execs the requested argv without a timeout.
 	// seeded with the requested terminal size.
 	require.Len(t, engine.execOptions, 1)
 	created := engine.execOptions[0]
 	require.True(t, created.TTY)
 	require.True(t, created.AttachStdin)
-	require.Equal(t, []string{"bash", "-l"}, created.Cmd)
+	require.Equal(t, []string{"/bin/sh", "-c", dockerTerminalBootstrap, "weknora-terminal", "bash", "-l"}, created.Cmd)
+	require.Contains(t, created.Env[len(created.Env)-1], "WEKNORA_TERMINAL_ID=")
 	require.Equal(t, "/workspace", created.WorkingDir)
 	require.Equal(t, DefaultSandboxExecUser, created.User)
 	require.Equal(t, uint(36), created.ConsoleSize.Height)
@@ -67,6 +68,8 @@ func TestExecStreamAllocatesPTYAndStreams(t *testing.T) {
 	require.NoError(t, waitErr)
 	require.Equal(t, 7, code)
 
+	// Subsequent fake one-shot cleanup succeeds independently of the exited PTY.
+	engine.execExit = 0
 	require.NoError(t, terminal.Close())
 	// Close is idempotent.
 	require.NoError(t, terminal.Close())
@@ -87,6 +90,7 @@ func TestExecStreamRejectsEmptyCommand(t *testing.T) {
 // adapter restarts it, and the terminal still opens.
 func TestExecStreamRequiresRunningContainer(t *testing.T) {
 	engine := newFakeDockerEngine()
+	engine.execTTYOutput = "\x1eweknora-terminal:42:42:999\x1f"
 	engine.inspect["container-1"] = container.InspectResponse{
 		ID:    "container-1",
 		State: &container.State{Status: "exited"},
@@ -108,6 +112,7 @@ func TestExecStreamRequiresRunningContainer(t *testing.T) {
 // with the context error, which is what the broker's lease expiry relies on.
 func TestExecStreamWaitHonoursContext(t *testing.T) {
 	engine := newFakeDockerEngine()
+	engine.execTTYOutput = "\x1eweknora-terminal:42:42:999\x1f"
 	engine.execTTYRunning = true
 	docker := newTestDockerClient(t, engine)
 

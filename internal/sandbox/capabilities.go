@@ -125,7 +125,7 @@ type SessionTurnHolder interface {
 
 // SessionTerminalOptions describes one interactive terminal request. The
 // terminal always runs as DefaultSandboxExecUser, so the option set stays
-// deliberately narrow: a shell argv (no wrapper, no in-sandbox timeout — the
+// deliberately narrow: a shell argv (no in-sandbox timeout — the
 // caller's ctx is the only lifetime bound), an initial working directory and
 // a starting TTY size.
 type SessionTerminalOptions struct {
@@ -152,8 +152,9 @@ type SessionTerminalSession interface {
 	Read(p []byte) (int, error)
 	Write(p []byte) (int, error)
 	Resize(cols, rows uint16) error
-	// Close tears the terminal down immediately. The exec process dies with
-	// the connection; Wait unblocks afterwards.
+	// Close terminates the terminal and its process scope, then tears down
+	// the stream. Merely closing a transport connection is not sufficient:
+	// providers must explicitly clean up processes. Wait unblocks afterwards.
 	Close() error
 	// Wait blocks until the terminal process exits or ctx is done, and
 	// reports the exit code. Callers that Close first observe a provider
