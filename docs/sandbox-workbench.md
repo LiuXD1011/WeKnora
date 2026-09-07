@@ -84,7 +84,7 @@ DockerRemoteClient.ExecStream（TTY exec + ExecResize）
 
 - 演示文稿：`@vue-office/pptx`；Skill 同时产出自包含 HTML 逐页放映。
 - 表格：SheetJS 解析后渲染受控表格，不执行工作簿中的脚本。
-- 网页：Blob URL + sandbox iframe，无同源权限。
+- 网页：Blob URL + `sandbox="allow-scripts"` iframe，无同源权限。下载响应的 CSP 不会随 Blob 自动继承，因此前端在任何产物内容之前插入文档级 CSP，禁止 fetch、外链脚本、外链图片、子框架与表单提交，仅保留自包含内容所需的内联脚本、样式和 data/blob 图片。此处不将 iframe 属性检查等同于实际浏览器隔离验证。
 - PDF、图片和文本：浏览器内置预览。
 
 ## 演示文稿 Skill
@@ -105,7 +105,14 @@ go test ./internal/middleware -run 'TestBearerTokenFromWebSocketSubProtocol' -co
 cd frontend
 npm run type-check
 npm run build
+
+# 真实前端组件 + 模拟 HTTP/WebSocket 的浏览器测试（不是实际沙箱集成）
+npx playwright test --config playwright.final.config.ts
 ```
+
+该浏览器套件增加恶意 HTML 验证：尝试读取父页面、Cookie、本地存储，移除策略 meta 后再发送 fetch/图片请求；断言读取均被拒绝且网络请求计数为零。原实现对此测试失败，修复后通过。测试报告写入 `frontend/e2e-artifacts/final-results.json`。
+
+Windows 上如开发服务器自动清理受进程权限影响，可在一个终端单独运行 `npm run dev -- --host 127.0.0.1 --port 8137 --strictPort`，再在另一个 PowerShell 终端设置 `$env:WEKNORA_E2E_EXTERNAL_SERVER='1'` 后运行上面的 Playwright 命令。测试结束后关闭该开发服务器。`WEKNORA_E2E_BASE_URL` 可覆盖外部服务器地址。
 
 ## 已知限制
 

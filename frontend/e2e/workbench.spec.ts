@@ -299,6 +299,49 @@ test.describe('sandbox workbench drawer', () => {
     await page.locator('.sandbox-workbench-drawer .t-drawer__content-wrapper').screenshot({ path: `${SHOT_DIR}/preview-csv.png` })
   })
 
+  test('hostile HTML cannot read host state or send fetch and image requests', async ({ page }, testInfo) => {
+    await mockWorkbenchApi(page)
+    await mockTerminalReady(page)
+    const escapedRequests: string[] = []
+    await page.route('**/__preview_probe__/**', async route => {
+      escapedRequests.push(route.request().url())
+      await route.fulfill({ status: 200, body: 'unexpected network access' })
+    })
+    const probeBase = new URL('/__preview_probe__/', testInfo.project.use.baseURL!).href
+    const hostile = `<!doctype html><html><head><title>Isolation probe</title></head><body>
+      <h1>恶意网页隔离验证</h1><pre id="security-results">running</pre>
+      <script>
+      (async () => {
+        const result = {};
+        for (const [key, read] of Object.entries({
+          parent: () => parent.document.body.innerHTML,
+          cookie: () => document.cookie,
+          storage: () => localStorage.getItem('weknora_token')
+        })) { try { read(); result[key] = 'accessible'; } catch { result[key] = 'blocked'; } }
+        // Removing a policy element must not revoke an already applied policy.
+        document.querySelectorAll('meta[http-equiv]').forEach(x => x.remove());
+        try { await fetch('${probeBase}fetch', { mode: 'no-cors' }); result.fetch = 'sent'; }
+        catch { result.fetch = 'blocked'; }
+        result.image = await new Promise(resolve => {
+          const img = new Image(); img.onload = () => resolve('loaded');
+          img.onerror = () => resolve('blocked'); img.src = '${probeBase}image';
+        });
+        document.getElementById('security-results').textContent = JSON.stringify(result);
+      })();
+      </script></body></html>`
+    await page.route('**/api/v1/sessions/*/sandbox/files/content?**', route =>
+      route.fulfill({ status: 200, contentType: 'text/html; charset=utf-8', body: hostile }))
+    await openWorkbench(page, 'e2e-interactive')
+    await page.locator('.t-tabs__nav-item').filter({ hasText: '文件' }).click()
+    await page.getByText('presentation.html').click()
+    const results = page.frameLocator('iframe.preview-frame').locator('#security-results')
+    await expect(results).toContainText('"image":')
+    const actual = JSON.parse((await results.textContent())!)
+    expect(actual).toEqual({ parent: 'blocked', cookie: 'blocked', storage: 'blocked', fetch: 'blocked', image: 'blocked' })
+    expect(escapedRequests).toEqual([])
+    await page.locator('.sandbox-workbench-drawer .t-drawer__content-wrapper').screenshot({ path: `${SHOT_DIR}/preview-isolation.png` })
+  })
+
   test('shows the empty state when the session has no live sandbox', async ({ page }) => {
     await mockWorkbenchApi(page)
     await openWorkbench(page, 'e2e-none')

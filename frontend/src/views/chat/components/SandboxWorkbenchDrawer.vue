@@ -154,6 +154,7 @@ import { MessagePlugin } from 'tdesign-vue-next'
 import VueOfficePptx from '@vue-office/pptx'
 import * as XLSX from 'xlsx'
 import { getFileIcon } from '@/utils/files'
+import { buildSandboxPreviewDocument } from '@/utils/sandboxPreview'
 import SandboxTerminal from './SandboxTerminal.vue'
 import {
   deleteSandboxWorkbenchFile,
@@ -377,7 +378,11 @@ async function previewFile(file: SandboxWorkbenchFile) {
     if (!preview.value || preview.value.file.path !== file.path) return
     const kind = previewKind(file.name, blob.type)
     preview.value.kind = kind
-    if (['html', 'pdf', 'image'].includes(kind)) {
+    if (kind === 'html') {
+      const document = buildSandboxPreviewDocument(await blob.text())
+      if (!preview.value || preview.value.file.path !== file.path) return
+      preview.value.url = URL.createObjectURL(new Blob([document], { type: 'text/html;charset=utf-8' }))
+    } else if (['pdf', 'image'].includes(kind)) {
       preview.value.url = URL.createObjectURL(blob)
     } else if (kind === 'pptx') {
       preview.value.buffer = await blob.arrayBuffer()
