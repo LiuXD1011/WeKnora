@@ -75,6 +75,12 @@ func SafeDialControlForPolicy(policy OutboundURLPolicy) func(string, string, sys
 // Callers must ALSO install DialControl on the dialer they use; Validate alone
 // cannot close the DNS-rebinding window.
 func (p OutboundURLPolicy) Validate(raw string) error {
+	return p.validateWithLookupIP(raw, net.LookupIP)
+}
+
+// validateWithLookupIP keeps DNS answers explicit in tests without replacing
+// the process-wide resolver or changing the production dial-time guard.
+func (p OutboundURLPolicy) validateWithLookupIP(raw string, lookupIP func(string) ([]net.IP, error)) error {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return fmt.Errorf("%w: empty URL", ErrUnsafeOutboundURL)
@@ -113,9 +119,12 @@ func (p OutboundURLPolicy) Validate(raw string) error {
 	if ip := net.ParseIP(host); ip != nil {
 		return p.checkIP(ip)
 	}
-	addrs, err := net.LookupIP(host)
+	addrs, err := lookupIP(host)
 	if err != nil {
 		return fmt.Errorf("%w: cannot resolve %q: %v", ErrUnsafeOutboundURL, host, err)
+	}
+	if len(addrs) == 0 {
+		return fmt.Errorf("%w: no addresses for %q", ErrUnsafeOutboundURL, host)
 	}
 	for _, ip := range addrs {
 		if err := p.checkIP(ip); err != nil {

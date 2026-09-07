@@ -113,11 +113,14 @@ func TestPolicyAllowsPublicLiteralAddresses(t *testing.T) {
 }
 
 func TestPolicyAllowsPublicHostname(t *testing.T) {
-	const host = "api.e2b.dev"
-	if _, err := net.LookupIP(host); err != nil {
-		t.Skipf("no DNS available in this environment: %v", err)
+	const host = "sandbox.example"
+	lookup := func(got string) ([]net.IP, error) {
+		if got != host {
+			t.Fatalf("lookup host = %q, want %q", got, host)
+		}
+		return []net.IP{net.ParseIP("203.0.113.10"), net.ParseIP("2001:db8::1")}, nil
 	}
-	if err := denyPrivate.Validate("https://" + host); err != nil {
+	if err := denyPrivate.validateWithLookupIP("https://"+host, lookup); err != nil {
 		t.Fatalf("denyPrivate.Validate(%q) = %v, want nil", host, err)
 	}
 }
@@ -125,9 +128,36 @@ func TestPolicyAllowsPublicHostname(t *testing.T) {
 func TestPolicyValidateRejectsUnresolvableHost(t *testing.T) {
 	// Fail closed: if we cannot verify where a host points, we refuse it. This
 	// also gives the admin an early "that hostname does not exist" signal.
-	err := denyPrivate.Validate("https://this-host-does-not-exist.invalid")
-	if err == nil {
-		t.Fatal("Validate on an unresolvable host = nil, want error")
+	lookup := func(string) ([]net.IP, error) { return nil, errors.New("fixture: DNS unavailable") }
+	err := denyPrivate.validateWithLookupIP("https://sandbox.invalid", lookup)
+	if !errors.Is(err, ErrUnsafeOutboundURL) {
+		t.Fatalf("unresolvable host error = %v, want ErrUnsafeOutboundURL", err)
+	}
+}
+
+func TestPolicyValidatesEveryDNSAnswer(t *testing.T) {
+	// DNS policy tests are hermetic: a proxy's fake-IP response, a resolver
+	// outage, or a changed public hostname must not change their expectations.
+	for _, tc := range []struct {
+		name      string
+		addresses []net.IP
+	}{
+		{"empty", nil},
+		{"nil address", []net.IP{nil}},
+		{"public then metadata", []net.IP{net.ParseIP("203.0.113.10"), net.ParseIP("169.254.169.254")}},
+		{"metadata then public", []net.IP{net.ParseIP("169.254.169.254"), net.ParseIP("203.0.113.10")}},
+		{"fake IP range", []net.IP{net.ParseIP("198.18.0.113")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, policy := range []OutboundURLPolicy{denyPrivate, allowPrivate} {
+				err := policy.validateWithLookupIP("https://sandbox.example", func(string) ([]net.IP, error) {
+					return tc.addresses, nil
+				})
+				if !errors.Is(err, ErrUnsafeOutboundURL) {
+					t.Fatalf("AllowPrivate=%v: error = %v, want ErrUnsafeOutboundURL", policy.AllowPrivate, err)
+				}
+			}
+		})
 	}
 }
 
