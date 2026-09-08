@@ -252,13 +252,15 @@ func (s *SandboxWorkbenchService) shellExecutor(
 	return provider.SessionShellExecutor(), session, nil
 }
 
-// assertResolvedArtifactPath closes the symlink escape left by lexical path
-// cleaning. realpath -m resolves existing symlink components even when the
+// assertResolvedArtifactPath rejects pre-existing symlink escapes left by
+// lexical cleaning. realpath -m resolves existing components even when the
 // final upload target does not exist; the returned canonical path must still
 // be below /workspace/output. The check happens inside the selected sandbox,
-// never against the WeKnora host filesystem.
+// never against the WeKnora host filesystem. Resolution and the subsequent
+// operation are separate RPCs: this is not an atomic no-symlink filesystem
+// primitive, and does not defend against concurrent component replacement.
 func (s *SandboxWorkbenchService) assertResolvedArtifactPath(
-	ctx context.Context, sessionID, absolutePath string,
+	ctx context.Context, sessionID, absolutePath string, allowRoot bool,
 ) error {
 	executor, _, err := s.shellExecutor(ctx, sessionID)
 	if err != nil {
@@ -275,6 +277,9 @@ func (s *SandboxWorkbenchService) assertResolvedArtifactPath(
 		return fmt.Errorf("sandbox workbench: cannot resolve artifact path")
 	}
 	resolved := strings.TrimSpace(result.Stdout)
+	if allowRoot && resolved == sandbox.SessionOutputRoot {
+		return nil
+	}
 	if resolved == sandbox.SessionOutputRoot || !strings.HasPrefix(resolved, sandbox.SessionOutputRoot+"/") {
 		return ErrSandboxWorkbenchPath
 	}
@@ -314,6 +319,11 @@ func (s *SandboxWorkbenchService) ListFiles(
 	if err != nil {
 		return nil, err
 	}
+	// Directory traversal resolves intermediate symlinks just like a read.
+	// Lexical filtering of the returned names alone does not confine it.
+	if err := s.assertResolvedArtifactPath(ctx, sessionID, absDir, true); err != nil {
+		return nil, err
+	}
 	entries, err := store.ListSessionFiles(ctx, sessionID, absDir)
 	if err != nil {
 		return nil, err
@@ -346,7 +356,7 @@ func (s *SandboxWorkbenchService) ReadFile(
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := s.assertResolvedArtifactPath(ctx, sessionID, absPath); err != nil {
+	if err := s.assertResolvedArtifactPath(ctx, sessionID, absPath, false); err != nil {
 		return nil, nil, err
 	}
 	stat, err := store.StatSessionFile(ctx, sessionID, absPath)
@@ -377,7 +387,7 @@ func (s *SandboxWorkbenchService) WriteFile(
 	if err != nil {
 		return err
 	}
-	if err := s.assertResolvedArtifactPath(ctx, sessionID, absPath); err != nil {
+	if err := s.assertResolvedArtifactPath(ctx, sessionID, absPath, false); err != nil {
 		return err
 	}
 	err = store.WriteSessionWorkspaceFile(ctx, sessionID, absPath, content)
@@ -400,10 +410,10 @@ func (s *SandboxWorkbenchService) RenameFile(
 	if err != nil {
 		return err
 	}
-	if err := s.assertResolvedArtifactPath(ctx, sessionID, oldAbs); err != nil {
+	if err := s.assertResolvedArtifactPath(ctx, sessionID, oldAbs, false); err != nil {
 		return err
 	}
-	if err := s.assertResolvedArtifactPath(ctx, sessionID, newAbs); err != nil {
+	if err := s.assertResolvedArtifactPath(ctx, sessionID, newAbs, false); err != nil {
 		return err
 	}
 	command := "mkdir -p -- " + sandbox.ShellQuote(path.Dir(newAbs)) +
@@ -431,7 +441,7 @@ func (s *SandboxWorkbenchService) DeleteFile(
 	if err != nil {
 		return err
 	}
-	if err := s.assertResolvedArtifactPath(ctx, sessionID, absPath); err != nil {
+	if err := s.assertResolvedArtifactPath(ctx, sessionID, absPath, false); err != nil {
 		return err
 	}
 	result, err := executor.ExecShellCommand(
