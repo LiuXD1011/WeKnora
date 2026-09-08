@@ -17,6 +17,7 @@ from pptx.util import Inches, Pt
 
 
 OUTPUT_ENV = "WEKNORA_SKILL_OUTPUT_DIR"
+MANIFEST_NAME = ".weknora-artifacts.json"
 NAME_RE = re.compile(r"[^A-Za-z0-9_-]+")
 
 
@@ -72,8 +73,10 @@ def build_pptx(title: str, subtitle: str, author: str, slides: list[dict], outpu
     prs.slide_height = Inches(7.5)
     cover = prs.slides.add_slide(prs.slide_layouts[6])
     cover.background.fill.solid()
-    cover.background.fill.fore_color.rgb = RGBColor(15, 36, 64)
-    add_title(cover, title, 2.1, 34, RGBColor(255, 255, 255))
+    # Keep the cover legible in both PowerPoint and the browser's PPTX
+    # renderer, whose text-colour support varies across releases.
+    cover.background.fill.fore_color.rgb = RGBColor(247, 250, 252)
+    add_title(cover, title, 2.1, 34, RGBColor(15, 36, 64))
     if subtitle:
         add_title(cover, subtitle, 3.25, 20, RGBColor(109, 213, 170))
     if author:
@@ -136,12 +139,34 @@ def main() -> int:
         html_path = output_dir / f"{output_name}.html"
         build_pptx(title, subtitle, author, slides, pptx_path)
         build_html(title, subtitle, author, slides, html_path)
+        artifacts = [
+            {
+                "path": pptx_path.name,
+                "type": "presentation",
+                "artifact_type": "presentation",
+                "preview_format": "pptx",
+                "media_type": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+                "purpose": "download",
+            },
+            {
+                "path": html_path.name,
+                "type": "webpage",
+                "artifact_type": "webpage",
+                "preview_format": "html",
+                "media_type": "text/html",
+                "purpose": "preview",
+            },
+        ]
+        manifest_path = output_dir / MANIFEST_NAME
+        temporary_manifest = output_dir / f"{MANIFEST_NAME}.tmp"
+        temporary_manifest.write_text(
+            json.dumps({"version": 1, "artifacts": artifacts}, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        temporary_manifest.replace(manifest_path)
         print(json.dumps({
             "success": True,
-            "artifacts": [
-                {"path": pptx_path.name, "type": "presentation", "purpose": "download"},
-                {"path": html_path.name, "type": "web", "purpose": "preview"},
-            ],
+            "artifacts": artifacts,
         }, ensure_ascii=False))
         return 0
     except Exception as exc:  # noqa: BLE001 - CLI returns a structured failure

@@ -52,3 +52,26 @@ func TestWorkbenchArtifactDirectoryHasNoPreviewType(t *testing.T) {
 	require.Empty(t, rows[0]["artifact_type"])
 	require.Empty(t, rows[0]["preview_format"])
 }
+
+func TestWorkbenchArtifactProducerManifestOverridesInferenceAndStaysHidden(t *testing.T) {
+	svc, store, _, _, _ := newWorkbenchForTest(sandbox.SandboxTypeDocker)
+	store.entries = []sandbox.RemoteDirEntry{
+		{Name: "deck.pptx", Path: sandbox.SessionOutputRoot + "/deck.pptx", Type: sandbox.RemoteEntryFile},
+		{Name: workbenchArtifactManifestName, Path: sandbox.SessionOutputRoot + "/" + workbenchArtifactManifestName, Type: sandbox.RemoteEntryFile},
+	}
+	store.content = []byte(`{"version":1,"artifacts":[{"path":"deck.pptx","artifact_type":"presentation","preview_format":"pptx","media_type":"application/vnd.openxmlformats-officedocument.presentationml.presentation"}]}`)
+	files, err := svc.ListFiles(context.Background(), "s-1", "")
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	require.Equal(t, "producer", files[0].ClassificationSource)
+}
+
+func TestWorkbenchArtifactProducerManifestRejectsUnknownRenderer(t *testing.T) {
+	svc, store, _, _, _ := newWorkbenchForTest(sandbox.SandboxTypeDocker)
+	store.entries = []sandbox.RemoteDirEntry{{Name: "payload.bin", Path: sandbox.SessionOutputRoot + "/payload.bin", Type: sandbox.RemoteEntryFile}}
+	store.content = []byte(`{"version":1,"artifacts":[{"path":"payload.bin","artifact_type":"webpage","preview_format":"javascript","media_type":"text/javascript"}]}`)
+	files, err := svc.ListFiles(context.Background(), "s-1", "")
+	require.NoError(t, err)
+	require.Equal(t, "extension", files[0].ClassificationSource)
+	require.Equal(t, "unsupported", files[0].PreviewFormat)
+}

@@ -332,8 +332,15 @@ func (s *SandboxWorkbenchService) ListFiles(
 	if err != nil {
 		return nil, err
 	}
+	var declarations map[string]workbenchArtifactDeclaration
+	if data, readErr := store.ReadSessionFile(ctx, sessionID, path.Join(absDir, workbenchArtifactManifestName)); readErr == nil {
+		declarations = parseWorkbenchArtifactManifest(data)
+	}
 	files := make([]SandboxWorkbenchFile, 0, len(entries))
 	for _, entry := range entries {
+		if entry.Name == workbenchArtifactManifestName || entry.Name == workbenchArtifactManifestName+".tmp" {
+			continue
+		}
 		clean := path.Clean(entry.Path)
 		if clean == sandbox.SessionOutputRoot || !strings.HasPrefix(clean, sandbox.SessionOutputRoot+"/") {
 			continue
@@ -346,6 +353,9 @@ func (s *SandboxWorkbenchService) ListFiles(
 			ModTime: entry.ModTime,
 		}
 		classifyWorkbenchArtifact(&file)
+		if declared, ok := declarations[entry.Name]; ok {
+			applyWorkbenchArtifactDeclaration(&file, declared)
+		}
 		files = append(files, file)
 	}
 	return files, nil
