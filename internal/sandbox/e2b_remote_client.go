@@ -84,8 +84,11 @@ func newE2BRemoteClient(
 	// or not a gateway is configured: the two details it rewrites belong to the
 	// envd protocol itself, not to any one deployment. See envd_compat_transport.go.
 	httpClient := &http.Client{
-		Timeout:   timeout,
-		Transport: NewEnvdCompatTransport(transport, DefaultSandboxExecUser),
+		// Unary/file calls retain the configured timeout, while an explicitly
+		// marked PTY Start stream lives until its terminal context ends.
+		Transport: &e2bRequestTimeoutTransport{
+			next: NewEnvdCompatTransport(transport, DefaultSandboxExecUser), timeout: timeout,
+		},
 	}
 	client, err := e2b.NewClient(e2b.ClientConfig{
 		APIKey:        cfg.E2BAPIKey,

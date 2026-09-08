@@ -32,10 +32,21 @@ DockerRemoteClient.ExecStream（TTY exec + ExecResize）
 |---|---|
 | `backend` | 会话绑定的后端类型（docker / cube / e2b） |
 | `terminal` | 支持命令模式（一次性执行并返回聚合输出） |
-| `interactive` | 支持交互式 PTY 终端（当前为 Docker） |
+| `interactive` | 支持交互式 PTY 终端（已实现 Docker / E2B 适配器） |
 | `files` | 支持产物文件管理 |
 
-交互式 PTY 由可选能力接口 `sandbox.SessionTerminalProvider` 提供；不支持流式传输的后端（Cube/E2B 的 envd HTTP exec）保持 nil，前端自动降级为命令模式，不伪装成交互终端。
+交互式 PTY 由可选能力接口 `sandbox.SessionTerminalProvider` 提供；尚未实现流式适配的 Cube 后端保持 nil，前端降级为命令模式。E2B 使用现有 SDK 的 `Pty.Create/SendInput/Resize/Kill`，不是将聚合命令输出伪装成流。
+
+E2B PTY 当前接受默认 `bash -l` 登录 shell，拒绝其他 argv；操作账号固定为 `1000`。长连接使用终端租约，首次响应另设 10 秒时限；普通控制、文件、输入和尺寸请求保留 HTTP 超时。关闭或取消时另用短时独立上下文清理带随机终端标记的进程，并调用 PTY Kill；清理失败会返回错误。模板须具备 bash、sh、grep 及 `/proc`，并为执行账号准备 `/workspace`。
+
+上述说明区分“适配器实现”与“真实后端验收”：协议夹具测试通过不表示真实 E2B 环境已通过。真实环境测试命令如下，缺少密钥或模板时直接报错：
+
+```bash
+# 从本地配置注入 E2B_INTEGRATION_API_KEY、E2B_INTEGRATION_TEMPLATE；
+# 自建环境另配 API_URL、SANDBOX_DOMAIN、PROXY_URL（同 E2B conformance）。
+go test -tags='workbench_integration e2b_integration' ./internal/sandbox \
+  -run '^TestE2BTerminalRealIntegration$' -count=1 -v -timeout=5m
+```
 
 ## 交互式终端 WebSocket 协议
 
@@ -131,6 +142,6 @@ WORKBENCH_INTEGRATION_IMAGE=weknora-workbench-test:20260907 \
 
 ## 已知限制
 
-- 交互式 PTY 终端当前仅 Docker 后端；Cube/E2B 走命令模式，待 envd 流式传输就绪后经同一能力接口接入。
+- Docker 与 E2B 已实现交互式 PTY 适配；E2B 仍须用真实接入环境完成验收，不能以协议模拟测试代替。Cube 当前仍走命令模式。
 - 交互模式下审计的是"用户键入的命令行"（含退格修正前的最终形态），不是 shell 实际展开后的执行体；命令模式的审计为完整聚合结果。
 - 预览派生文件（如 PPTX 转 HTML）由 Skill 在沙箱内生成；沙箱回收后原文件不可用，界面提示重新生成。

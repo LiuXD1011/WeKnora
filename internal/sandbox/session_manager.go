@@ -810,7 +810,7 @@ func (m *SessionBoundManager) SessionFileStore() SessionFileStore {
 
 // SessionTerminalProvider advertises the interactive-terminal capability while
 // the manager is open and the active provider client implements PTY streaming.
-// Backends without a streaming transport (Cube/E2B's envd-compatible HTTP exec)
+// Backends without a streaming adapter (currently Cube's aggregate HTTP exec)
 // keep it nil, and the workbench degrades to one-shot shell exec for them.
 func (m *SessionBoundManager) SessionTerminalProvider() SessionTerminalProvider {
 	if m == nil || m.remoteDisabled() {

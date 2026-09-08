@@ -448,7 +448,7 @@ type RemoteTerminalSession interface {
 
 // RemoteStreamExecClient is the optional PTY capability of a provider client.
 // Adapters whose transport has no interactive process channel (today: the
-// envd-compatible HTTP exec used by Cube/E2B) simply do not implement it; the
+// aggregate envd HTTP exec used by Cube) simply do not implement it; the
 // session manager then keeps the terminal capability nil and the application
 // layer degrades to one-shot shell exec.
 type RemoteStreamExecClient interface {
