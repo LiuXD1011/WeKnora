@@ -23,6 +23,7 @@ func TestExecStreamAllocatesPTYAndStreams(t *testing.T) {
 
 	terminal, err := docker.ExecStream(context.Background(), testHandle("container-1"), RemoteStreamExecRequest{
 		Command: []string{"bash", "-l"},
+		Env:     []string{"PROMPT_COMMAND=echo audit"},
 		WorkDir: "/workspace",
 		User:    DefaultSandboxExecUser,
 		Cols:    120,
@@ -39,6 +40,7 @@ func TestExecStreamAllocatesPTYAndStreams(t *testing.T) {
 	require.True(t, created.TTY)
 	require.True(t, created.AttachStdin)
 	require.Equal(t, []string{"/bin/sh", "-c", dockerTerminalBootstrap, "weknora-terminal", "bash", "-l"}, created.Cmd)
+	require.Equal(t, "PROMPT_COMMAND=echo audit", created.Env[0])
 	require.Contains(t, created.Env[len(created.Env)-1], "WEKNORA_TERMINAL_ID=")
 	require.Equal(t, "/workspace", created.WorkingDir)
 	require.Equal(t, DefaultSandboxExecUser, created.User)

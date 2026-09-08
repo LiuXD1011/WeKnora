@@ -44,6 +44,17 @@ const (
 	// runs without the exec wrapper, so nothing else would touch the marker
 	// and the sweeper would reap the container after DefaultDockerIdleTTL.
 	SandboxWorkbenchTerminalKeepAliveInterval = 4 * time.Minute
+
+	// SandboxWorkbenchTerminalAuditOSCPrefix starts a private OSC record emitted
+	// by the bash prompt hook after a command actually finishes. The handler
+	// removes the record from terminal output and persists its command/status.
+	SandboxWorkbenchTerminalAuditOSCPrefix = "\x1b]6973;"
+
+	// The first prompt only arms the hook. Later prompts read bash's committed
+	// history entry, so readline history selection, completion and cursor edits
+	// are audited as the command that actually ran rather than raw keystrokes.
+	// Payload: OSC 6973 ; exit_status ; history_number ; base64(command) BEL.
+	workbenchTerminalAuditPromptCommand = `__wk_rc=$?; HISTCONTROL=; HISTIGNORE=; __wk_hist="$(HISTTIMEFORMAT= builtin history 1 2>/dev/null)"; read -r __wk_num __wk_cmd <<< "$__wk_hist"; if [ -z "${__WEKNORA_AUDIT_READY:-}" ]; then __WEKNORA_AUDIT_READY=1; elif [ -n "$__wk_num" ] && [ "$__wk_num" != "${__WEKNORA_LAST_HIST:-}" ]; then __wk_b64="$(printf %s "$__wk_cmd" | base64 | tr -d '\n')"; printf '\033]6973;%s;%s;%s\007' "$__wk_rc" "$__wk_num" "$__wk_b64"; fi; __WEKNORA_LAST_HIST="$__wk_num"`
 )
 
 var (
@@ -649,8 +660,14 @@ func (s *SandboxWorkbenchService) OpenTerminal(
 	}
 	terminalSession, err := provider.OpenSessionTerminal(leaseCtx, sessionID, sandbox.SessionTerminalOptions{
 		WorkDir: sandbox.SessionWorkspaceRoot,
-		Cols:    cols,
-		Rows:    rows,
+		Env: []string{
+			"PROMPT_COMMAND=" + workbenchTerminalAuditPromptCommand,
+			"HISTCONTROL=",
+			"HISTIGNORE=",
+			"HISTFILE=/dev/null",
+		},
+		Cols: cols,
+		Rows: rows,
 	})
 	if err != nil {
 		cancelLease()
@@ -774,6 +791,29 @@ func (s *SandboxWorkbenchService) AuditTerminalInput(
 	})
 }
 
+// AuditTerminalCommand records a command reported after bash executed it. In
+// contrast to AuditTerminalInput this is execution-layer evidence: command is
+// the committed readline/history value and exitCode is the resulting status.
+func (s *SandboxWorkbenchService) AuditTerminalCommand(
+	ctx context.Context, sessionID, terminalID, historyID, command string, exitCode int,
+) {
+	command = strings.TrimRight(command, "\r\n")
+	if command == "" {
+		return
+	}
+	_, session, err := s.ownedManager(ctx, sessionID)
+	if err != nil || session == nil {
+		return
+	}
+	s.auditTerminalEvent(ctx, session, "sandbox.terminal_command", terminalID, map[string]any{
+		"command":     command,
+		"exit_code":   exitCode,
+		"history_id":  historyID,
+		"interrupted": false,
+		"source":      "shell",
+	})
+}
+
 func (s *SandboxWorkbenchService) auditTerminalEvent(
 	ctx context.Context, session *types.Session, action, terminalID string, details map[string]any,
 ) {
@@ -788,6 +828,11 @@ func (s *SandboxWorkbenchService) auditTerminalEvent(
 			outcome = types.AuditOutcomeFailed
 		}
 		if details["cleanup_error"] != nil {
+			outcome = types.AuditOutcomeFailed
+		}
+	}
+	if action == "sandbox.terminal_command" {
+		if code, ok := details["exit_code"].(int); ok && code != 0 {
 			outcome = types.AuditOutcomeFailed
 		}
 	}

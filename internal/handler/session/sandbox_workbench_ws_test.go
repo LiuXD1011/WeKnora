@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -71,7 +72,21 @@ func (t *wsTerminalSession) Write(p []byte) (int, error) {
 	defer t.mu.Unlock()
 	// Echo back so the test can assert the output pump end to end.
 	t.echo = append(t.echo, p...)
+	line := strings.TrimRight(string(p), "\r\n")
+	if line != "" && (bytesContains(p, '\r') || bytesContains(p, '\n')) {
+		t.echo = append(t.echo, []byte(service.SandboxWorkbenchTerminalAuditOSCPrefix+"0;1;"+
+			base64.StdEncoding.EncodeToString([]byte(line))+"\a")...)
+	}
 	return len(p), nil
+}
+
+func bytesContains(data []byte, target byte) bool {
+	for _, value := range data {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 func (t *wsTerminalSession) Resize(cols, rows uint16) error {
@@ -281,6 +296,29 @@ func TestTerminalWorkbenchWSRoundTrip(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
+}
+
+func TestTerminalAuditOSCDecoderHandlesChunkingAndStripsControlRecord(t *testing.T) {
+	decoder := &terminalAuditOSCDecoder{}
+	first, records := decoder.feed([]byte("before\x1b]69"))
+	require.Equal(t, "before", string(first))
+	require.Empty(t, records)
+
+	command := "printf 'two words' && false"
+	payload := "73;7;42;" + base64.StdEncoding.EncodeToString([]byte(command)) + "\aafter"
+	second, records := decoder.feed([]byte(payload))
+	require.Equal(t, "after", string(second))
+	require.Equal(t, []terminalAuditRecord{{ExitCode: 7, HistoryID: "42", Command: command}}, records)
+	require.Empty(t, decoder.flush())
+}
+
+func TestTerminalAuditOSCDecoderRejectsForgedFieldsWithoutLeakingOSC(t *testing.T) {
+	decoder := &terminalAuditOSCDecoder{}
+	visible, records := decoder.feed([]byte(
+		"x" + service.SandboxWorkbenchTerminalAuditOSCPrefix + "999;not-a-number;%%%\a" + "y",
+	))
+	require.Equal(t, "xy", string(visible))
+	require.Empty(t, records)
 }
 
 // TestTerminalWorkbenchWSRejectsWhenNoSlotIsLeft proves the limit error is

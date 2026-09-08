@@ -14,8 +14,8 @@ const sandboxSpanPreviewRunes = 256
 // tree instead of a pile of Docker Engine HTTP calls parented to whatever
 // agent.round happened to be recording. No-op when Langfuse is disabled.
 //
-// Snapshot capability is forwarded: wrapping must not hide RemoteSnapshotManager
-// from SnapshotManagerFrom.
+// Optional snapshot and PTY-stream capabilities are forwarded: wrapping must
+// not make a configured backend appear less capable than its real adapter.
 func wrapLangfuseRemoteClient(inner RemoteSandboxClient) RemoteSandboxClient {
 	if inner == nil {
 		return nil
@@ -26,9 +26,22 @@ func wrapLangfuseRemoteClient(inner RemoteSandboxClient) RemoteSandboxClient {
 	if _, ok := inner.(*langfuseSnapshotClient); ok {
 		return inner
 	}
+	if _, ok := inner.(*langfuseStreamClient); ok {
+		return inner
+	}
+	if _, ok := inner.(*langfuseSnapshotStreamClient); ok {
+		return inner
+	}
 	wrapped := langfuseRemoteClient{inner: inner}
-	if _, ok := inner.(RemoteSnapshotManager); ok {
+	_, snapshots := inner.(RemoteSnapshotManager)
+	_, streams := inner.(RemoteStreamExecClient)
+	switch {
+	case snapshots && streams:
+		return &langfuseSnapshotStreamClient{langfuseSnapshotClient: langfuseSnapshotClient{langfuseRemoteClient: wrapped}}
+	case snapshots:
 		return &langfuseSnapshotClient{langfuseRemoteClient: wrapped}
+	case streams:
+		return &langfuseStreamClient{langfuseRemoteClient: wrapped}
 	}
 	return &wrapped
 }
@@ -186,6 +199,49 @@ type langfuseSnapshotClient struct {
 	langfuseRemoteClient
 }
 
+type langfuseStreamClient struct {
+	langfuseRemoteClient
+}
+
+func (c *langfuseStreamClient) ExecStream(
+	ctx context.Context, handle RemoteSandboxHandle, req RemoteStreamExecRequest,
+) (RemoteTerminalSession, error) {
+	return c.langfuseRemoteClient.execStream(ctx, handle, req)
+}
+
+type langfuseSnapshotStreamClient struct {
+	langfuseSnapshotClient
+}
+
+func (c *langfuseSnapshotStreamClient) ExecStream(
+	ctx context.Context, handle RemoteSandboxHandle, req RemoteStreamExecRequest,
+) (RemoteTerminalSession, error) {
+	return c.langfuseRemoteClient.execStream(ctx, handle, req)
+}
+
+func (c *langfuseRemoteClient) execStream(
+	ctx context.Context, handle RemoteSandboxHandle, req RemoteStreamExecRequest,
+) (RemoteTerminalSession, error) {
+	inner, ok := c.inner.(RemoteStreamExecClient)
+	if !ok {
+		return nil, &RemoteError{
+			Kind:    RemoteErrorKindUnsupported,
+			Op:      "ExecStream",
+			Message: "inner client has no PTY stream",
+		}
+	}
+	ctx, span := startSandboxSpan(ctx, "sandbox.exec_stream", map[string]interface{}{
+		"command":  req.Command,
+		"work_dir": req.WorkDir,
+		"user":     req.User,
+		"cols":     req.Cols,
+		"rows":     req.Rows,
+	}, sandboxHandleMeta(handle))
+	terminal, err := inner.ExecStream(ctx, handle, req)
+	span.Finish(map[string]interface{}{"opened": terminal != nil}, nil, err)
+	return terminal, err
+}
+
 func (c *langfuseSnapshotClient) CreateSnapshot(
 	ctx context.Context, sandboxID string, name string,
 ) (RemoteSnapshotRef, error) {
@@ -281,6 +337,9 @@ func truncateSandboxPreview(s string) string {
 }
 
 var (
-	_ RemoteSandboxClient   = (*langfuseRemoteClient)(nil)
-	_ RemoteSnapshotManager = (*langfuseSnapshotClient)(nil)
+	_ RemoteSandboxClient    = (*langfuseRemoteClient)(nil)
+	_ RemoteSnapshotManager  = (*langfuseSnapshotClient)(nil)
+	_ RemoteStreamExecClient = (*langfuseStreamClient)(nil)
+	_ RemoteSnapshotManager  = (*langfuseSnapshotStreamClient)(nil)
+	_ RemoteStreamExecClient = (*langfuseSnapshotStreamClient)(nil)
 )

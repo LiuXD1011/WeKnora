@@ -865,6 +865,7 @@ func (m *SessionBoundManager) OpenSessionTerminal(
 
 	terminal, err := streamClient.ExecStream(ctx, handle, RemoteStreamExecRequest{
 		Command: shell,
+		Env:     append([]string(nil), opts.Env...),
 		WorkDir: workDir,
 		// Named explicitly rather than left to the adapter default, mirroring
 		// ExecShellCommandWithOptions: an interactive shell must never depend

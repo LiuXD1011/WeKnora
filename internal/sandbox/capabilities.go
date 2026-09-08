@@ -133,6 +133,10 @@ type SessionTerminalOptions struct {
 	// provider picks its default login shell.
 	Shell []string
 
+	// Env is merged into the terminal process environment. Values use KEY=VALUE
+	// form and are validated by the provider adapter.
+	Env []string
+
 	// WorkDir is the initial working directory. Empty means the provider
 	// default (/workspace for Docker).
 	WorkDir string

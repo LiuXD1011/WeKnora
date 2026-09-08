@@ -9,6 +9,30 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type langfuseTestStreamClient struct {
+	RemoteSandboxClient
+	requests []RemoteStreamExecRequest
+}
+
+func (c *langfuseTestStreamClient) ExecStream(
+	_ context.Context, _ RemoteSandboxHandle, req RemoteStreamExecRequest,
+) (RemoteTerminalSession, error) {
+	c.requests = append(c.requests, req)
+	return nil, nil
+}
+
+type langfuseTestSnapshotStreamClient struct {
+	*fakeRemoteClient
+	requests []RemoteStreamExecRequest
+}
+
+func (c *langfuseTestSnapshotStreamClient) ExecStream(
+	_ context.Context, _ RemoteSandboxHandle, req RemoteStreamExecRequest,
+) (RemoteTerminalSession, error) {
+	c.requests = append(c.requests, req)
+	return nil, nil
+}
+
 func TestWrapLangfuseRemoteClientPreservesSnapshotCapability(t *testing.T) {
 	inner := newFakeRemoteClient(SandboxTypeCube)
 	inner.capabilities.SupportsSnapshots = true
@@ -29,6 +53,33 @@ func TestWrapLangfuseRemoteClientDoesNotInventSnapshotSupport(t *testing.T) {
 	mgr, ok := SnapshotManagerFrom(wrapped)
 	require.False(t, ok)
 	require.Nil(t, mgr)
+}
+
+func TestWrapLangfuseRemoteClientPreservesStreamCapability(t *testing.T) {
+	inner := &langfuseTestStreamClient{RemoteSandboxClient: &contractClient{provider: SandboxTypeDocker}}
+	wrapped := wrapLangfuseRemoteClient(inner)
+	stream, ok := wrapped.(RemoteStreamExecClient)
+	require.True(t, ok, "wrapping must not hide RemoteStreamExecClient")
+	require.NotNil(t, stream)
+	_, err := stream.ExecStream(context.Background(), nil, RemoteStreamExecRequest{Command: []string{"bash", "-l"}})
+	require.NoError(t, err)
+	require.Equal(t, []string{"bash", "-l"}, inner.requests[0].Command)
+}
+
+func TestWrapLangfuseRemoteClientDoesNotInventStreamSupport(t *testing.T) {
+	wrapped := wrapLangfuseRemoteClient(&noSnapshotClient{RemoteSandboxClient: &contractClient{provider: SandboxTypeCube}})
+	_, ok := wrapped.(RemoteStreamExecClient)
+	require.False(t, ok)
+}
+
+func TestWrapLangfuseRemoteClientPreservesSnapshotAndStreamTogether(t *testing.T) {
+	inner := &langfuseTestSnapshotStreamClient{fakeRemoteClient: newFakeRemoteClient(SandboxTypeE2B)}
+	wrapped := wrapLangfuseRemoteClient(inner)
+	_, snapshots := wrapped.(RemoteSnapshotManager)
+	_, streams := wrapped.(RemoteStreamExecClient)
+	require.True(t, snapshots)
+	require.True(t, streams)
+	require.Same(t, wrapped, wrapLangfuseRemoteClient(wrapped))
 }
 
 func TestWrapLangfuseRemoteClientIdempotent(t *testing.T) {

@@ -1,7 +1,9 @@
 package session
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	stderrors "errors"
 	"fmt"
@@ -14,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Tencent/WeKnora/internal/application/service"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
@@ -90,10 +93,9 @@ type workbenchWSMessage struct {
 	Rows uint16 `json:"rows,omitempty"`
 }
 
-// terminalInputSniffer reconstructs typed command lines from the PTY input
-// stream so interactive sessions keep the per-command audit promise. It is
-// best effort by design: tab completion and history editing mean the recorded
-// line is what the user typed, not necessarily a canonical command string.
+// terminalInputSniffer retains only interrupted, never-executed input. Normal
+// commands are audited from the shell's post-execution OSC record instead of
+// guessed from raw keystrokes.
 type terminalInputSniffer struct {
 	workbench  *service.SandboxWorkbenchService
 	ctx        context.Context
@@ -106,7 +108,7 @@ func (s *terminalInputSniffer) feed(chunk []byte) {
 	for _, b := range chunk {
 		switch {
 		case b == '\r' || b == '\n':
-			s.report(false)
+			s.line.Reset()
 		case b == 0x03: // Ctrl-C
 			s.report(true)
 		case b == 0x7f || b == 0x08: // backspace trims the last typed byte
@@ -120,24 +122,110 @@ func (s *terminalInputSniffer) feed(chunk []byte) {
 		case b >= 0x20 && b != 0x7f, b >= 0x80:
 			s.line.WriteByte(b)
 			if s.line.Len() > 2000 {
-				s.report(false)
+				s.line.Reset()
 			}
 		}
 	}
 }
 
-// flush records a trailing command that was still being typed when the
-// connection ended.
+// A disconnect does not execute the unfinished line, so it must not be stored
+// as a terminal_command event.
 func (s *terminalInputSniffer) flush() {
-	if s.line.Len() > 0 {
-		s.report(false)
-	}
+	s.line.Reset()
 }
 
 func (s *terminalInputSniffer) report(interrupted bool) {
 	line := s.line.String()
 	s.line.Reset()
 	s.workbench.AuditTerminalInput(s.ctx, s.sessionID, s.terminalID, line, interrupted)
+}
+
+type terminalAuditRecord struct {
+	ExitCode  int
+	HistoryID string
+	Command   string
+}
+
+// terminalAuditOSCDecoder strips the private bash prompt-hook OSC sequence
+// from the user-visible stream and returns complete execution records. It
+// keeps a possible marker suffix between reads because provider chunks may
+// split at any byte.
+type terminalAuditOSCDecoder struct {
+	pending []byte
+}
+
+const terminalAuditOSCMaxBytes = 32 << 10
+
+func (d *terminalAuditOSCDecoder) feed(chunk []byte) ([]byte, []terminalAuditRecord) {
+	prefix := []byte(service.SandboxWorkbenchTerminalAuditOSCPrefix)
+	data := append(append([]byte(nil), d.pending...), chunk...)
+	d.pending = nil
+	visible := make([]byte, 0, len(data))
+	records := make([]terminalAuditRecord, 0, 1)
+	for len(data) > 0 {
+		index := bytes.Index(data, prefix)
+		if index < 0 {
+			keep := terminalAuditMarkerSuffix(data, prefix)
+			visible = append(visible, data[:len(data)-keep]...)
+			d.pending = append(d.pending, data[len(data)-keep:]...)
+			break
+		}
+		visible = append(visible, data[:index]...)
+		rest := data[index+len(prefix):]
+		end := bytes.IndexByte(rest, '\a')
+		if end < 0 {
+			d.pending = append(d.pending, data[index:]...)
+			if len(d.pending) > terminalAuditOSCMaxBytes {
+				d.pending = nil
+			}
+			break
+		}
+		if record, ok := parseTerminalAuditOSC(rest[:end]); ok {
+			records = append(records, record)
+		}
+		data = rest[end+1:]
+	}
+	return visible, records
+}
+
+func (d *terminalAuditOSCDecoder) flush() []byte {
+	left := d.pending
+	d.pending = nil
+	return left
+}
+
+func terminalAuditMarkerSuffix(data, prefix []byte) int {
+	max := len(prefix) - 1
+	if len(data) < max {
+		max = len(data)
+	}
+	for size := max; size > 0; size-- {
+		if bytes.Equal(data[len(data)-size:], prefix[:size]) {
+			return size
+		}
+	}
+	return 0
+}
+
+func parseTerminalAuditOSC(payload []byte) (terminalAuditRecord, bool) {
+	parts := bytes.SplitN(payload, []byte(";"), 3)
+	if len(parts) != 3 || len(parts[1]) == 0 || len(parts[2]) > terminalAuditOSCMaxBytes {
+		return terminalAuditRecord{}, false
+	}
+	exitCode, err := strconv.Atoi(string(parts[0]))
+	if err != nil || exitCode < 0 || exitCode > 255 {
+		return terminalAuditRecord{}, false
+	}
+	for _, b := range parts[1] {
+		if b < '0' || b > '9' {
+			return terminalAuditRecord{}, false
+		}
+	}
+	command, err := base64.StdEncoding.DecodeString(string(parts[2]))
+	if err != nil || len(command) == 0 || len(command) > terminalAuditOSCMaxBytes || !utf8.Valid(command) {
+		return terminalAuditRecord{}, false
+	}
+	return terminalAuditRecord{ExitCode: exitCode, HistoryID: string(parts[1]), Command: string(command)}, true
 }
 
 // TerminalSandboxWorkbenchWS upgrades to the interactive terminal stream. The
@@ -243,15 +331,31 @@ func (h *Handler) TerminalSandboxWorkbenchWS(c *gin.Context) {
 	outputDone := make(chan error, 1)
 	go func() {
 		buf := make([]byte, 16<<10)
+		decoder := &terminalAuditOSCDecoder{}
 		for {
 			n, readErr := terminal.Session.Read(buf)
 			if n > 0 {
-				if err := write(websocket.BinaryMessage, buf[:n]); err != nil {
-					outputDone <- err
-					return
+				visible, records := decoder.feed(buf[:n])
+				for _, record := range records {
+					workbench.AuditTerminalCommand(
+						streamCtx, sessionID, terminal.ID,
+						record.HistoryID, record.Command, record.ExitCode,
+					)
+				}
+				if len(visible) > 0 {
+					if err := write(websocket.BinaryMessage, visible); err != nil {
+						outputDone <- err
+						return
+					}
 				}
 			}
 			if readErr != nil {
+				if tail := decoder.flush(); len(tail) > 0 {
+					if err := write(websocket.BinaryMessage, tail); err != nil {
+						outputDone <- err
+						return
+					}
+				}
 				outputDone <- readErr
 				return
 			}

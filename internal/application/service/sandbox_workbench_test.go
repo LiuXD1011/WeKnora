@@ -331,6 +331,17 @@ func TestSandboxWorkbenchOpenTerminalEnforcesPerSessionCap(t *testing.T) {
 	require.Equal(t, uint16(24), provider.opts[0].Rows)
 	require.Equal(t, uint16(120), provider.opts[1].Cols)
 	require.Equal(t, uint16(36), provider.opts[1].Rows)
+	require.Contains(t, provider.opts[0].Env, "HISTCONTROL=")
+	require.Contains(t, provider.opts[0].Env, "HISTIGNORE=")
+	require.Contains(t, provider.opts[0].Env, "HISTFILE=/dev/null")
+	require.Condition(t, func() bool {
+		for _, entry := range provider.opts[0].Env {
+			if strings.HasPrefix(entry, "PROMPT_COMMAND=") && strings.Contains(entry, "history 1") && strings.Contains(entry, "6973") {
+				return true
+			}
+		}
+		return false
+	})
 
 	// Every open runs under the terminal lease.
 	lease := time.Until(provider.deadlines[0])

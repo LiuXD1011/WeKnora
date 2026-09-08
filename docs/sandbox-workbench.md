@@ -91,7 +91,7 @@ go test -tags='workbench_integration e2b_integration' ./internal/sandbox \
 - WebSocket 在进程退出、租约结束、浏览器断开或异常帧到达时结束，不再等待下一次键盘输入。退出事件与单条关闭审计记录同一原因和实际退出码；后端故障不再误标为租约到期。关闭审计使用保留租户/操作者信息的独立短时上下文，避免断开连接后丢失记录。
 - 交互终端期间每 4 分钟经包装命令刷新一次 Docker 空闲回收的活动标记，避免挂着终端的容器被判定空闲回收。
 - HTML 预览使用不含 `allow-same-origin` 的 sandbox iframe；服务端内联响应另附加 CSP。
-- 审计：`sandbox.terminal_opened` / `sandbox.terminal_closed`（含原因与退出码）、`sandbox.terminal_command`（命令模式记录完整命令与结果；交互模式由输入流重建命令行，Ctrl-C 记为 `^C` 并标记 interrupted）、`sandbox.file_written` / `sandbox.file_renamed` / `sandbox.file_deleted`。
+- 审计：`sandbox.terminal_opened` / `sandbox.terminal_closed`（含原因与退出码）、`sandbox.terminal_command`（命令模式记录完整命令与结果；交互模式由 shell 在命令真实结束后上报 readline/history 已提交命令、history id 与退出码，服务端剥离私有控制记录后持久化；Ctrl-C 中断尚未执行的输入仍记为 `^C` 并标记 interrupted）、`sandbox.file_written` / `sandbox.file_renamed` / `sandbox.file_deleted`。
 
 ## 前端预览
 
@@ -143,5 +143,5 @@ WORKBENCH_INTEGRATION_IMAGE=weknora-workbench-test:20260907 \
 ## 已知限制
 
 - Docker 与 E2B 已实现交互式 PTY 适配；E2B 仍须用真实接入环境完成验收，不能以协议模拟测试代替。Cube 当前仍走命令模式。
-- 交互模式下审计的是"用户键入的命令行"（含退格修正前的最终形态），不是 shell 实际展开后的执行体；命令模式的审计为完整聚合结果。
+- 交互模式下审计的是 shell/readline 实际提交执行的命令行及其退出码（可覆盖历史召回、补全和光标编辑后的最终命令），不是原始键盘字节或 shell 展开后的子进程执行体；命令模式的审计为完整聚合结果。
 - 预览派生文件（如 PPTX 转 HTML）由 Skill 在沙箱内生成；沙箱回收后原文件不可用，界面提示重新生成。
