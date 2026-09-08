@@ -16,6 +16,10 @@ export type SandboxWorkbenchFile = {
   type: 'file' | 'dir' | 'other'
   size: number
   mod_time: string
+  artifact_type?: 'presentation' | 'webpage' | 'spreadsheet' | 'file'
+  preview_format?: 'html' | 'pptx' | 'spreadsheet' | 'image' | 'pdf' | 'text' | 'unsupported'
+  media_type?: string
+  classification_source?: 'extension'
 }
 
 export type SandboxCommandResult = {

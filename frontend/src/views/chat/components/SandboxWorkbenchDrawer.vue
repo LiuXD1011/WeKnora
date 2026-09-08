@@ -94,6 +94,9 @@
               <button class="file-main" type="button" :disabled="file.type === 'other'" @click="openEntry(file)">
                 <t-icon :name="file.type === 'dir' ? 'folder-open' : getFileIcon(file.name)" />
                 <span class="file-name" :title="file.path">{{ file.type === 'dir' ? `${file.path}/` : file.path }}</span>
+                <t-tag v-if="file.type === 'file'" size="small" variant="light" class="artifact-type-tag">
+                  <span class="artifact-type-label" :title="file.classification_source === 'extension' ? '由服务端按文件扩展名分类' : '文件类型'">{{ sandboxArtifactLabel(file) }}</span>
+                </t-tag>
                 <span class="file-size">{{ file.type === 'dir' ? '目录' : formatBytes(file.size) }}</span>
               </button>
               <div class="file-actions" v-if="file.type === 'file'">
@@ -153,6 +156,7 @@ import { computed, nextTick, onUnmounted, ref, watch } from 'vue'
 import { MessagePlugin } from 'tdesign-vue-next'
 import VueOfficePptx from '@vue-office/pptx'
 import * as XLSX from 'xlsx'
+import { sandboxArtifactLabel, sandboxArtifactPreviewKind } from '@/utils/sandboxArtifact'
 import { getFileIcon } from '@/utils/files'
 import { buildSandboxPreviewDocument } from '@/utils/sandboxPreview'
 import SandboxTerminal from './SandboxTerminal.vue'
@@ -358,17 +362,6 @@ async function deleteFile(file: SandboxWorkbenchFile) {
   }
 }
 
-function previewKind(name: string, mimeType: string): PreviewKind {
-  const ext = name.split('.').pop()?.toLowerCase() || ''
-  if (['html', 'htm'].includes(ext)) return 'html'
-  if (ext === 'pdf') return 'pdf'
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg'].includes(ext)) return 'image'
-  if (['pptx', 'ppt'].includes(ext)) return 'pptx'
-  if (['xlsx', 'xls', 'csv', 'tsv'].includes(ext)) return 'sheet'
-  if (mimeType.startsWith('text/') || ['md', 'json', 'yaml', 'yml', 'log', 'txt'].includes(ext)) return 'text'
-  return 'unsupported'
-}
-
 async function previewFile(file: SandboxWorkbenchFile) {
   clearPreview()
   preview.value = { file, kind: 'unsupported', loading: true, url: '', rows: [], text: '' }
@@ -376,7 +369,7 @@ async function previewFile(file: SandboxWorkbenchFile) {
   try {
     const blob = await downloadSandboxWorkbenchFile(props.sessionId, file.path)
     if (!preview.value || preview.value.file.path !== file.path) return
-    const kind = previewKind(file.name, blob.type)
+    const kind = sandboxArtifactPreviewKind(file, blob.type)
     preview.value.kind = kind
     if (kind === 'html') {
       const document = buildSandboxPreviewDocument(await blob.text())

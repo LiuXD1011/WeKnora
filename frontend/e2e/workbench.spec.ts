@@ -21,9 +21,10 @@ const FILE_ENTRIES_ROOT = [
     type: 'file',
     size: 2048,
     mod_time: '2026-09-02T10:05:00Z',
+    artifact_type: 'webpage', preview_format: 'html', media_type: 'text/html', classification_source: 'extension',
   },
-  { name: 'deck.pptx', path: 'deck.pptx', type: 'file', size: 482_013, mod_time: '2026-09-02T10:06:00Z' },
-  { name: 'sales.csv', path: 'sales.csv', type: 'file', size: 128, mod_time: '2026-09-02T10:07:00Z' },
+  { name: 'deck.pptx', path: 'deck.pptx', type: 'file', size: 482_013, mod_time: '2026-09-02T10:06:00Z', artifact_type: 'presentation', preview_format: 'pptx', classification_source: 'extension' },
+  { name: 'sales.csv', path: 'sales.csv', type: 'file', size: 128, mod_time: '2026-09-02T10:07:00Z', artifact_type: 'spreadsheet', preview_format: 'spreadsheet', classification_source: 'extension' },
   { name: 'summary.md', path: 'summary.md', type: 'file', size: 1_024, mod_time: '2026-09-02T10:09:00Z' },
   { name: 'chart.png', path: 'chart.png', type: 'file', size: 86_400, mod_time: '2026-09-02T10:10:00Z' },
 ]
@@ -31,6 +32,18 @@ const FILE_ENTRIES_ROOT = [
 const FILE_ENTRIES_REPORTS = [
   { name: 'a.txt', path: 'reports/a.txt', type: 'file', size: 24, mod_time: '2026-09-02T10:08:00Z' },
 ]
+
+test('server artifact type labels distinguish presentation webpage and spreadsheet', async ({ page }) => {
+  await mockWorkbenchApi(page)
+  await openWorkbench(page, 'e2e-exec')
+  await page.locator('.t-tabs__nav-item').filter({ hasText: '文件' }).click()
+  for (const [name, label] of [['deck.pptx', '演示文稿'], ['presentation.html', '网页'], ['sales.csv', '表格']]) {
+    const row = page.locator('.workbench-file-row').filter({ has: page.locator('.file-name', { hasText: name }) })
+    await expect(row.locator('.artifact-type-tag')).toHaveText(label)
+    await expect(row.locator('.artifact-type-label')).toHaveAttribute('title', '由服务端按文件扩展名分类')
+  }
+  await page.locator('.sandbox-workbench-drawer .t-drawer__content-wrapper').screenshot({ path: `${SHOT_DIR}/artifact-types.png` })
+})
 
 const HTML_ARTIFACT = `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>课题汇报</title>
 <style>body{margin:0;background:#0f2440;color:#fff;font-family:"Microsoft YaHei",sans-serif}

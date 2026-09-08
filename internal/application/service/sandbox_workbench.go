@@ -62,11 +62,15 @@ var ErrSandboxWorkbenchTerminalLimit = errors.New(
 // Path is always relative to /workspace/output; provider identifiers and
 // absolute sandbox paths never cross the API boundary.
 type SandboxWorkbenchFile struct {
-	Name    string                     `json:"name"`
-	Path    string                     `json:"path"`
-	Type    sandbox.RemoteDirEntryType `json:"type"`
-	Size    int64                      `json:"size"`
-	ModTime time.Time                  `json:"mod_time"`
+	Name                 string                     `json:"name"`
+	Path                 string                     `json:"path"`
+	Type                 sandbox.RemoteDirEntryType `json:"type"`
+	Size                 int64                      `json:"size"`
+	ModTime              time.Time                  `json:"mod_time"`
+	ArtifactType         string                     `json:"artifact_type,omitempty"`
+	PreviewFormat        string                     `json:"preview_format,omitempty"`
+	MediaType            string                     `json:"media_type,omitempty"`
+	ClassificationSource string                     `json:"classification_source,omitempty"`
 }
 
 // SandboxWorkbenchCommand is one terminal invocation. WorkDir is relative to
@@ -334,13 +338,15 @@ func (s *SandboxWorkbenchService) ListFiles(
 		if clean == sandbox.SessionOutputRoot || !strings.HasPrefix(clean, sandbox.SessionOutputRoot+"/") {
 			continue
 		}
-		files = append(files, SandboxWorkbenchFile{
+		file := SandboxWorkbenchFile{
 			Name:    entry.Name,
 			Path:    strings.TrimPrefix(clean, sandbox.SessionOutputRoot+"/"),
 			Type:    entry.Type,
 			Size:    entry.Size,
 			ModTime: entry.ModTime,
-		})
+		}
+		classifyWorkbenchArtifact(&file)
+		files = append(files, file)
 	}
 	return files, nil
 }

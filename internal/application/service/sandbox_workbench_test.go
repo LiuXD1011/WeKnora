@@ -162,6 +162,9 @@ func TestSandboxWorkbenchListsOnlyArtifactRootForTwoBackends(t *testing.T) {
 			require.Equal(t, 1, store.listCalls)
 			require.Equal(t, []SandboxWorkbenchFile{{
 				Name: "deck.pptx", Path: "deck.pptx", Type: sandbox.RemoteEntryFile, Size: 12,
+				ArtifactType: "presentation", PreviewFormat: "pptx",
+				MediaType:            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+				ClassificationSource: "extension",
 			}}, files)
 		})
 	}
