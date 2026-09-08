@@ -49,8 +49,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zstd \
     && rm -rf /var/lib/apt/lists/* /var/cache/apt/*
 
-# Note: Current preloaded skills only use Python stdlib
-# Add packages here when skills actually need them:
+# Runtime dependency used by the preloaded presentation generator. Keep it in
+# the base image so the checked-in Skill works on a fresh Docker/Cube sandbox
+# without an undocumented per-session install step.
+RUN uv pip install --system --no-cache python-pptx==1.0.2
 
 # Create non-root user (UID 1000) for sandbox execution. The account is named
 # "user" because that is the account name E2B templates are expected to expose

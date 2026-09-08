@@ -19,7 +19,7 @@ export type SandboxWorkbenchFile = {
   artifact_type?: 'presentation' | 'webpage' | 'spreadsheet' | 'file'
   preview_format?: 'html' | 'pptx' | 'spreadsheet' | 'image' | 'pdf' | 'text' | 'unsupported'
   media_type?: string
-  classification_source?: 'extension'
+  classification_source?: 'producer' | 'extension'
 }
 
 export type SandboxCommandResult = {

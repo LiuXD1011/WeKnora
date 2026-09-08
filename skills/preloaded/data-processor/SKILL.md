@@ -13,6 +13,7 @@ description: 数据处理与分析技能。当用户需要对知识库检索结�
 2. **格式转换**: JSON/CSV/Markdown 等格式相互转换
 3. **数据提取**: 从非结构化文本中提取结构化信息
 4. **报告生成**: 生成数据分析报告和摘要
+5. **电子表格生成**: 生成带标题、表头、冻结窗格和自动筛选的 `.xlsx` 产物
 
 ## 使用场景
 
@@ -21,6 +22,7 @@ description: 数据处理与分析技能。当用户需要对知识库检索结�
 - "转换为 JSON/CSV 格式"
 - "提取关键信息"、"整理成表格"
 - "生成报告"、"数据汇总"
+- "生成 Excel"、"导出电子表格"
 
 ## 可用脚本
 
@@ -102,6 +104,36 @@ echo "2024年销售额为100万元，同比增长15%" | python scripts/extract_i
   "amounts": ["100万元"]
 }
 ```
+
+### 4. generate_spreadsheet.py - Excel 电子表格生成脚本
+
+通过标准输入接收 JSON，并在 Skill 产物目录生成可预览、可下载的 `.xlsx`：
+
+```json
+{
+  "output_name": "sandbox-acceptance",
+  "title": "WeKnora 沙盒验收表",
+  "sheet_name": "验收结果",
+  "columns": ["验收项", "后端", "结果"],
+  "rows": [
+    ["演示文稿预览", "Docker", "通过"],
+    ["电子表格预览", "Docker", "通过"]
+  ]
+}
+```
+
+调用：
+
+```json
+{
+  "skill_name": "数据处理器",
+  "script_path": "scripts/generate_spreadsheet.py",
+  "input": "{...上面的 JSON...}"
+}
+```
+
+脚本会同步写入 `.weknora-artifacts.json`，声明 `spreadsheet` 产物类型和
+`spreadsheet` 预览格式，供沙盒工作台按生产者元数据展示。
 
 ## 处理流程
 
