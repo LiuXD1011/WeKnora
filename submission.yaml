@@ -11,5 +11,5 @@ result:
 repository:
   url: "https://github.com/LiuXD1011/WeKnora.git"
   branch: "feat/visual-sandbox-workbench"
-  commit: "d0db6a20705b1aeb815697e246c6583a405d7b5c"
-  tag: "rhino-2026-final-课题二"
+  commit: "211808555b6dc334add1c3c8c90c947cfd98c027"
+  tag: "rhino-2026-final-课题二-v2"
