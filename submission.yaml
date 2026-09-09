@@ -1,0 +1,15 @@
+version: 1
+student:
+  name: "刘雪灯"
+  github_id: "LiuXD1011"
+topic:
+  id: "课题二"
+  title: "可视化沙箱工作台"
+result:
+  type: code
+  url: "https://github.com/LiuXD1011/WeKnora/tree/feat/visual-sandbox-workbench"
+repository:
+  url: "https://github.com/LiuXD1011/WeKnora.git"
+  branch: "feat/visual-sandbox-workbench"
+  commit: "d0db6a20705b1aeb815697e246c6583a405d7b5c"
+  tag: "rhino-2026-final-课题二"
