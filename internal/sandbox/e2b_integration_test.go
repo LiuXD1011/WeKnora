@@ -274,18 +274,24 @@ func waitForE2BSandboxPause(
 	var lastState RemoteSandboxState
 	var lastRawState string
 	for {
-		summary, err := client.Get(ctx, sandboxID)
+		summaries, err := client.List(ctx, RemoteListFilter{
+			Metadata: expectedMetadata,
+			States:   []RemoteSandboxState{RemoteStateRunning, RemoteStatePaused},
+		})
 		if err != nil {
 			t.Fatalf("E2B control plane did not return the sandbox as paused with lifecycle "+
-				"metadata; Get stopped returning sandbox %s before the %s deadline: %v",
+				"metadata; List failed for sandbox %s before the %s deadline: %v",
 				sandboxID, e2bIntegrationPauseTimeout, err)
 		}
-		if summary == nil {
-			t.Fatal("control-plane Get returned nil while waiting for pause")
-		}
-		lastState = summary.State
-		lastRawState = summary.RawState
-		if summary.State == RemoteStatePaused {
+		for _, summary := range summaries {
+			if summary.ID != sandboxID {
+				continue
+			}
+			lastState = summary.State
+			lastRawState = summary.RawState
+			if summary.State != RemoteStatePaused {
+				break
+			}
 			if !metadataMatches(summary.Metadata, expectedMetadata) {
 				t.Fatalf("paused sandbox omitted lifecycle metadata: got=%v want=%v",
 					summary.Metadata, expectedMetadata)
@@ -317,15 +323,22 @@ func waitForE2BSandboxDeletion(
 
 	var lastState RemoteSandboxState
 	for {
-		summary, err := client.Get(ctx, sandboxID)
-		if IsRemoteNotFound(err) {
-			return
-		}
+		summaries, err := client.List(ctx, RemoteListFilter{
+			States: []RemoteSandboxState{RemoteStateRunning, RemoteStatePaused},
+		})
 		if err != nil {
-			t.Fatalf("Get while verifying lifecycle Destroy: %v", err)
+			t.Fatalf("List while verifying lifecycle Destroy: %v", err)
 		}
-		if summary != nil {
-			lastState = summary.State
+		found := false
+		for _, summary := range summaries {
+			if summary.ID == sandboxID {
+				found = true
+				lastState = summary.State
+				break
+			}
+		}
+		if !found {
+			return
 		}
 
 		select {

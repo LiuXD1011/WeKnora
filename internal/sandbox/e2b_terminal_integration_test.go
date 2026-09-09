@@ -82,7 +82,11 @@ func TestE2BTerminalRealIntegration(t *testing.T) {
 			}
 			term, output := open(t, parent)
 			file := path.Join(workdir, mode+".pid")
-			write(t, term, "setsid sleep 600 & echo $! > "+ShellQuote(file)+"; printf 'CHILD_%s\\n' ready\r")
+			// Fully detach the child from the PTY file descriptors. Otherwise the
+			// background sleep keeps the stream open after `exit 7`, preventing
+			// Wait from observing the login shell's natural exit before Close gets
+			// a chance to reclaim descendants by terminal marker.
+			write(t, term, "setsid sleep 600 </dev/null >/dev/null 2>&1 & echo $! > "+ShellQuote(file)+"; printf 'CHILD_%s\\n' ready\r")
 			waitText(t, output, "\nCHILD_ready\n")
 			data, err := client.ReadFile(ctx, handle, file)
 			require.NoError(t, err)

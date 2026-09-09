@@ -42,6 +42,31 @@ test('server artifact type labels distinguish presentation webpage and spreadshe
     await expect(row.locator('.artifact-type-tag')).toHaveText(label)
     await expect(row.locator('.artifact-type-label')).toHaveAttribute('title', '由服务端按文件扩展名分类')
   }
+  const rowLayout = await page.locator('.workbench-file-row').evaluateAll(rows => rows.map(row => {
+    const rowRect = row.getBoundingClientRect()
+    const name = row.querySelector<HTMLElement>('.file-name')?.textContent?.trim() || ''
+    const size = row.querySelector<HTMLElement>('.file-size')
+    const tag = row.querySelector<HTMLElement>('.artifact-type-tag')
+    const sizeRect = size?.getBoundingClientRect()
+    const tagRect = tag?.getBoundingClientRect()
+    const center = rowRect.top + rowRect.height / 2
+    return {
+      name,
+      rowHeight: rowRect.height,
+      sizeText: size?.textContent?.trim() || '',
+      sizeWhiteSpace: size ? getComputedStyle(size).whiteSpace : '',
+      sizeHeight: sizeRect?.height || 0,
+      sizeCenterOffset: sizeRect ? Math.abs(sizeRect.top + sizeRect.height / 2 - center) : 0,
+      tagCenterOffset: tagRect ? Math.abs(tagRect.top + tagRect.height / 2 - center) : 0,
+    }
+  }))
+  console.log(`ARTIFACT_FILE_ROW_LAYOUT=${JSON.stringify(rowLayout)}`)
+  for (const row of rowLayout) {
+    expect(row.sizeWhiteSpace).toBe('nowrap')
+    expect(row.sizeHeight).toBeLessThanOrEqual(18)
+    expect(row.sizeCenterOffset).toBeLessThanOrEqual(1)
+    expect(row.tagCenterOffset).toBeLessThanOrEqual(1)
+  }
   await page.locator('.sandbox-workbench-drawer .t-drawer__content-wrapper').screenshot({ path: `${SHOT_DIR}/artifact-types.png` })
 })
 

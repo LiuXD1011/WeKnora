@@ -209,6 +209,52 @@ print("oom_kill=" + str(oom_kill))
 	require.Contains(t, recovered.Stdout, "recovered survivor=0")
 	require.NotContains(t, recovered.Stdout, "oom_kill=0")
 	t.Log("RECOVERY=PASS")
+
+	// Sustained attempts to exceed the hard CPU ceiling must terminate the
+	// session, rather than merely throttle it forever. This is intentionally a
+	// separate session because the sticky exhausted marker prevents reconnect.
+	const cpuSession = "cpu-limit-termination"
+	ctxCPU := types.WithSandboxTenantID(context.Background(), 2202)
+	t.Cleanup(func() { cleanup(ctxCPU, cpuSession) })
+	cpuStart := time.Now()
+	cpu := executeFinalAcceptance(t, ctxCPU, manager, cpuSession, `
+while True:
+    pass
+	`, 30*time.Second)
+	require.True(t, cpu.Killed, "%#v", cpu)
+	require.Contains(t, []int{-1, 137}, cpu.ExitCode,
+		"Docker may report -1 when the container stops before ExecInspect observes SIGKILL")
+	require.Less(t, time.Since(cpuStart), 20*time.Second,
+		"CPU guard must terminate before the wall-clock timeout")
+
+	var cpuSandboxes []RemoteSandboxSummary
+	stateDeadline := time.Now().Add(10 * time.Second)
+	for {
+		cpuSandboxes, err = remote.List(context.Background(), RemoteListFilter{
+			Metadata: map[string]string{remoteMetadataSessionID: cpuSession},
+		})
+		require.NoError(t, err)
+		require.Len(t, cpuSandboxes, 1)
+		if cpuSandboxes[0].State != RemoteStateRunning || time.Now().After(stateDeadline) {
+			break
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	require.Equal(t, RemoteStatePaused, cpuSandboxes[0].State)
+
+	// Connect may briefly observe the restarted container as running before its
+	// entrypoint sees the sticky marker. Either way, it must settle back to a
+	// stopped state and reject real work.
+	_, _ = remote.Connect(context.Background(), cpuSandboxes[0].ID)
+	_, execErr := remote.Exec(context.Background(), &dockerSandboxHandle{id: cpuSandboxes[0].ID}, RemoteExecRequest{
+		Command: "echo must-not-run",
+		Shell:   true,
+		Timeout: 5 * time.Second,
+		User:    DefaultSandboxExecUser,
+	})
+	require.Error(t, execErr, "a CPU-exhausted session must not execute after reconnect")
+	t.Logf("CPU_LIMIT_TERMINATION=PASS exit=%d killed=%v elapsed=%s state=%s",
+		cpu.ExitCode, cpu.Killed, time.Since(cpuStart).Round(time.Millisecond), cpuSandboxes[0].State)
 }
 
 func executeFinalAcceptance(

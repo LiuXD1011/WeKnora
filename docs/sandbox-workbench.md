@@ -39,13 +39,14 @@ DockerRemoteClient.ExecStream（TTY exec + ExecResize）
 
 E2B PTY 当前接受默认 `bash -l` 登录 shell，拒绝其他 argv；操作账号固定为 `1000`。长连接使用终端租约，首次响应另设 10 秒时限；普通控制、文件、输入和尺寸请求保留 HTTP 超时。关闭或取消时另用短时独立上下文清理带随机终端标记的进程，并调用 PTY Kill；清理失败会返回错误。模板须具备 bash、sh、grep 及 `/proc`，并为执行账号准备 `/workspace`。
 
-上述说明区分“适配器实现”与“真实后端验收”：协议夹具测试通过不表示真实 E2B 环境已通过。真实环境测试命令如下，缺少密钥或模板时直接报错：
+上述说明区分“适配器实现”与“真实后端验收”：协议夹具测试通过不表示真实 E2B 环境已通过。2026 年 9 月 9 日已使用 `weknora` 模板完成 E2B Cloud 控制面、生命周期与 PTY 终端三组真实测试；复验仍须提供自己的密钥和模板，缺少任一项时测试会直接报错：
 
 ```bash
 # 从本地配置注入 E2B_INTEGRATION_API_KEY、E2B_INTEGRATION_TEMPLATE；
 # 自建环境另配 API_URL、SANDBOX_DOMAIN、PROXY_URL（同 E2B conformance）。
 go test -tags='workbench_integration e2b_integration' ./internal/sandbox \
-  -run '^TestE2BTerminalRealIntegration$' -count=1 -v -timeout=5m
+  -run '^(TestE2BCompatibleControlPlaneConformance|TestE2BIntegrationLifecycleParity|TestE2BTerminalRealIntegration)$' \
+  -count=1 -v -timeout=20m
 ```
 
 ## 交互式终端 WebSocket 协议
@@ -140,8 +141,17 @@ WORKBENCH_INTEGRATION_IMAGE=weknora-workbench-test:20260907 \
 
 覆盖主动关闭、取消、时长到期、脱离原进程组的后台作业、shell 正常退出后的子进程清理，以及 UID 1000、实时输出、Ctrl-C 返回 130、37×111 终端尺寸和并行终端互不影响。CPU/内存超限终止和跨租户授权验收需分别运行对应测试，不能用此套件替代。
 
+Docker 会先用 cgroup `cpu.max`/`cpu.cfs_quota_us` 施加不可突破的 CPU 硬限额。若会话持续尝试超额并累计产生 5 秒 cgroup throttling，容器内守护逻辑会终止全部执行进程、写入不可恢复标记并停止会话；后续连接不会自动恢复该容器。内存 OOM、命令时长、PID 数量、双租户隔离及 CPU 持续超限终止由最终验收测试共同覆盖：
+
+```bash
+FINAL_ACCEPTANCE_IMAGE=<包含 python3 的沙箱镜像> \
+  go test -tags final_acceptance ./internal/sandbox \
+  -run '^TestDockerFinalAcceptanceTenantAndResourceIsolation$' \
+  -count=1 -v -timeout=10m
+```
+
 ## 已知限制
 
-- Docker 与 E2B 已实现交互式 PTY 适配；E2B 仍须用真实接入环境完成验收，不能以协议模拟测试代替。Cube 当前仍走命令模式。
+- Docker 与 E2B 已实现交互式 PTY 适配；E2B Cloud 三组真实集成测试已于 2026 年 9 月 9 日通过，第三方复验仍需自备 API Key 和兼容模板。Cube 当前仍走命令模式。
 - 交互模式下审计的是 shell/readline 实际提交执行的命令行及其退出码（可覆盖历史召回、补全和光标编辑后的最终命令），不是原始键盘字节或 shell 展开后的子进程执行体；命令模式的审计为完整聚合结果。
 - 预览派生文件（如 PPTX 转 HTML）由 Skill 在沙箱内生成；沙箱回收后原文件不可用，界面提示重新生成。

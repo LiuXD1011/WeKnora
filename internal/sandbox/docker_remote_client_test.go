@@ -9,6 +9,7 @@ import (
 	"io"
 	"iter"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -486,6 +487,10 @@ func TestDockerClientCreateAppliesIsolationAndMetadata(t *testing.T) {
 	require.Equal(t, "/bin/sh", created.Config.Entrypoint[0])
 	require.Contains(t, created.Config.Entrypoint[2], "touch "+dockerActivityMarker)
 	require.Contains(t, created.Config.Entrypoint[2], "chmod 666 "+dockerActivityMarker)
+	require.Contains(t, created.Config.Entrypoint[2], dockerCPUExhaustedMarker)
+	require.Contains(t, created.Config.Entrypoint[2], strconv.FormatInt(dockerCPUThrottleBudgetMicros, 10))
+	require.Contains(t, created.Config.Entrypoint[2], "throttled_usec")
+	require.Contains(t, created.Config.Entrypoint[2], "throttled_time")
 	require.Contains(t, created.Config.Entrypoint[2], "exec sleep infinity")
 	require.NotNil(t, created.Config.Cmd,
 		"an empty (not nil) Cmd is what resets the image's own CMD on the wire")

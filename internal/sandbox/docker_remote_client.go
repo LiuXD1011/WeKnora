@@ -59,6 +59,17 @@ import (
 // and outside /tmp so a tmpfs mount cannot hide it.
 const dockerActivityMarker = "/var/lib/weknora-sandbox-activity"
 
+// dockerCPUExhaustedMarker makes CPU-limit termination sticky. Docker models
+// an ordinary stopped container as paused and Connect normally resumes it. A
+// sandbox that exceeded its CPU ceiling must instead stay terminated until the
+// session binding is replaced, so PID 1 exits immediately if this marker exists.
+const dockerCPUExhaustedMarker = "/var/lib/weknora-sandbox-cpu-exhausted"
+
+// dockerCPUThrottleBudgetMicros is the accumulated time a container may spend
+// throttled by its hard CPU ceiling before the session is terminated. A short
+// burst is harmless; sustained attempts to exceed the ceiling are not.
+const dockerCPUThrottleBudgetMicros int64 = 5_000_000
+
 // dockerSandboxEntrypoint keeps the container alive without running anything —
 // the container is a place to exec into, not a service — and prepares the
 // activity marker on the way.
@@ -71,11 +82,51 @@ const dockerActivityMarker = "/var/lib/weknora-sandbox-activity"
 // touch it. Without this the idle sweeper would see a session that only ever
 // ran scripts as untouched, and reclaim it out from under the user.
 var dockerSandboxEntrypoint = []string{
-	"/bin/sh", "-c",
-	"touch " + dockerActivityMarker + " 2>/dev/null; " +
-		"chmod 666 " + dockerActivityMarker + " 2>/dev/null; " +
-		"exec sleep infinity",
+	"/bin/sh", "-c", dockerSandboxSupervisorScript,
 }
+
+// dockerSandboxSupervisorScript keeps PID 1's child alive, refreshes the idle
+// marker contract, and terminates the entire session after sustained cgroup CPU
+// throttling. It supports cgroup v2 throttled_usec and cgroup v1 throttled_time.
+// The latter is reported in nanoseconds and is normalized to microseconds.
+var dockerSandboxSupervisorScript = `
+if [ -f ` + dockerCPUExhaustedMarker + ` ]; then
+  exit 137
+fi
+touch ` + dockerActivityMarker + ` 2>/dev/null
+chmod 666 ` + dockerActivityMarker + ` 2>/dev/null
+keeper=$$
+cpu_stat=""
+for candidate in /sys/fs/cgroup/cpu.stat /sys/fs/cgroup/cpu/cpu.stat; do
+  if [ -r "$candidate" ]; then cpu_stat="$candidate"; break; fi
+done
+read_throttled_micros() {
+  awk '$1 == "throttled_usec" { print $2; found=1 }
+       $1 == "throttled_time" { printf "%.0f\n", $2 / 1000; found=1 }
+       END { if (!found) print 0 }' "$cpu_stat"
+}
+if [ -n "$cpu_stat" ]; then
+  (
+    read guardian _ < /proc/self/stat
+    baseline=$(read_throttled_micros)
+    while sleep 1; do
+      current=$(read_throttled_micros)
+      exceeded=$(awk -v now="$current" -v start="$baseline" 'BEGIN { print (now-start >= ` + strconv.FormatInt(dockerCPUThrottleBudgetMicros, 10) + `) ? 1 : 0 }')
+      if [ "$exceeded" = 1 ]; then
+        touch ` + dockerCPUExhaustedMarker + ` 2>/dev/null
+        for proc in /proc/[0-9]*; do
+          pid=${proc##*/}
+          if [ "$pid" = 1 ] || [ "$pid" = "$keeper" ] || [ "$pid" = "$guardian" ]; then continue; fi
+          kill -KILL "$pid" 2>/dev/null || true
+        done
+        kill -TERM "$keeper" 2>/dev/null || true
+        exit 0
+      fi
+    done
+  ) &
+fi
+exec sleep infinity
+`
 
 // DockerRemoteClient implements RemoteSandboxClient on top of one Docker
 // daemon. It is safe for concurrent use: the moby client is, and this type
